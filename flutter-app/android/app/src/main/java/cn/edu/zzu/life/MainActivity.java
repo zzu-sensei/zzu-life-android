@@ -84,7 +84,55 @@ public class MainActivity extends FlutterActivity {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 8103);
             }
         }
+        if ("checkUpdate".equals(call.method)) {
+            executor.execute(() -> {
+                try {
+                    result.success(UpdateChecker.check(this).toString());
+                } catch (Exception error) {
+                    result.error("UPDATE_CHECK", describe(error), null);
+                }
+            });
+            return;
+        }
+        if ("saveUpdateProxyPrefix".equals(call.method)) {
+            MonitorSettings.saveUpdateProxyPrefix(this, call.argument("prefix"));
+            result.success("{\"ok\":true}");
+            return;
+        }
+        if ("getUpdateProxyPrefix".equals(call.method)) {
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("ok", true);
+                payload.put("prefix", MonitorSettings.updateProxyPrefix(this));
+                result.success(payload.toString());
+            } catch (Exception error) {
+                result.error("UPDATE_PREFIX", describe(error), null);
+            }
+            return;
+        }
+        if ("installUpdate".equals(call.method)) {
+            String url = call.argument("url");
+            String version = call.argument("version");
+            executor.execute(() -> {
+                try {
+                    result.success(
+                            UpdateChecker.downloadAndInstall(this, url, version).toString());
+                } catch (Exception error) {
+                    result.error("UPDATE_INSTALL", describe(error), null);
+                }
+            });
+            return;
+        }
         executor.execute(() -> executePython(call, result));
+    }
+
+    /** 把异常整理成能直接展示给用户的一句话。 */
+    private static String describe(Exception error) {
+        String message = error.getMessage();
+        if (message == null || message.isEmpty()) {
+            return error.getClass().getSimpleName();
+        }
+        return message;
     }
 
     @SuppressWarnings("unchecked")

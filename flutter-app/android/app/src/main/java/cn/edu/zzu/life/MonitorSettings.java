@@ -36,6 +36,14 @@ final class MonitorSettings {
     /** 培养方案各类别的学分要求（JSON 数组）。 */
     private static final String PLAN_REQUIREMENTS = "plan_requirements";
 
+    /**
+     * 检查更新与下载安装包时使用的加速前缀。
+     *
+     * 国内直连 GitHub 常常超时，很多镜像服务支持「前缀 + 原始地址」的用法，
+     * 例如 {@code https://ghfast.top/}。留空表示直连。
+     */
+    private static final String UPDATE_PROXY_PREFIX = "update_proxy_prefix";
+
     /** 采样保留天数。 */
     private static final int SAMPLE_RETENTION_DAYS = 30;
     /** 采样条数上限，避免 SharedPreferences 无限膨胀。 */
@@ -167,6 +175,17 @@ final class MonitorSettings {
 
     static void clearEnergySamples(Context context) {
         prefs(context).edit().remove(ENERGY_SAMPLES).apply();
+    }
+
+    /** 检查更新用的加速前缀，留空表示直连。 */
+    static String updateProxyPrefix(Context context) {
+        return prefs(context).getString(UPDATE_PROXY_PREFIX, "").trim();
+    }
+
+    static void saveUpdateProxyPrefix(Context context, String prefix) {
+        prefs(context).edit()
+                .putString(UPDATE_PROXY_PREFIX, prefix == null ? "" : prefix.trim())
+                .apply();
     }
 
 

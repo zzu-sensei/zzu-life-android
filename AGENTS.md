@@ -18,6 +18,7 @@
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MainActivity.java` | Platform-channel dispatch |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorScheduler.java` | Background jobs (grade / energy checks) |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorSettings.java` | SharedPreferences-backed settings |
+| `flutter-app/android/app/src/main/java/cn/edu/zzu/life/UpdateChecker.java` | In-app update: queries the GitHub Release, downloads the APK via an optional URL prefix, hands it to the system installer |
 | `.github/workflows/build-apk.yaml` | Builds and publishes the APK on `v*` tags |
 | `.github/workflows/ci.yaml` | `flutter analyze` on push/PR |
 | `scripts/test_mobile_plan.py` | Offline regression check for the plan parser |
@@ -94,10 +95,18 @@ flutter build apk --release --target-platform android-arm64
 
 - **Never write `android/keystore.properties` with a UTF-8 BOM.** Java's `Properties` reads the BOM as part of the first key, so `storeFile` silently becomes `\uFEFFstoreFile`, the lookup fails, and Gradle quietly falls back to the auto-generated debug key — producing an APK that cannot upgrade the installed app. PowerShell's `Set-Content -Encoding UTF8` adds a BOM; write it with `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))` instead. Verify with `apksigner verify --print-certs` that the digest matches the expected keystore.
 
+## In-App Update
+
+- `UpdateChecker.java` reads `https://api.github.com/repos/zzu-sensei/zzu-life-android/releases/latest`, compares `tag_name` against the installed `versionName`, then downloads the `arm64` APK asset and hands it to the system installer through a `FileProvider` (`${applicationId}.fileprovider`, paths defined in `res/xml/file_paths.xml`).
+- **Installation always requires the user to confirm in the system UI.** No app can install silently; do not try to work around this. Android 8+ additionally needs per-source "install unknown apps" permission — the code detects this and sends the user to the right settings screen before failing with an explanatory message.
+- Download URLs are restricted to `github.com` / `githubusercontent.com` hosts (`isTrusted`). Keep that check: it prevents a tampered release payload from pointing the download somewhere else.
+- **Releases are published per tag, not per push.** Pushing to `main` does not update the Release the app checks; push a `v*` tag (see Versioning below).
+- **GitHub is often unreachable from mainland China.** `MonitorSettings.updateProxyPrefix` holds a user-editable "acceleration prefix", and `applyPrefix()` concatenates it in front of the full original URL — many mirrors work as `prefix + original_url` (e.g. `https://ghfast.top/`). Empty means direct. A bare host (`ghfast.top`) is normalised to `https://`. Both the API call and the APK download go through it. Do not replace this with local-port proxy probing; end users on a phone rarely run a local proxy.
+
 ## Versioning And Release
 
 - Version lives in `flutter-app/pubspec.yaml` as `versionName+versionCode`.
-- **`versionCode` must never decrease.** It is currently `22`. A version code lower than the installed one makes `adb install -r` fail with `INSTALL_FAILED_VERSION_DOWNGRADE`, and the only fix is uninstalling (which wipes app data).
+- **`versionCode` must never decrease.** It is currently `23`. A version code lower than the installed one makes `adb install -r` fail with `INSTALL_FAILED_VERSION_DOWNGRADE`, and the only fix is uninstalling (which wipes app data).
 - `versionName` restarted at `1.0.0`. The earlier `3.x` series continued the numbering of a superseded native app and meant nothing for this project.
 - `release/` and `*.apk` are gitignored: **APKs are distributed as GitHub Release assets, not committed.** Push a `v*` tag to trigger `.github/workflows/build-apk.yaml`.
 - Signing: `flutter-app/android/keystore.properties` (gitignored, template `keystore.properties.example`). **Keep the keystore** — changing it breaks in-place upgrades for everyone. CI reads it from `ANDROID_KEYSTORE_BASE64` and friends; without those secrets Gradle falls back to debug signing.

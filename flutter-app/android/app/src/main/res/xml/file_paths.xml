@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可见路径：只暴露应用内部 files 目录下的 updates/，
+     用于把下载好的 APK 交给系统安装器。不要把整个目录树暴露出去。 -->
+<paths>
+    <files-path name="updates" path="updates/" />
+</paths>

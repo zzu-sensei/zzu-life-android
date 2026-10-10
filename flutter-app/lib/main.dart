@@ -3409,11 +3409,207 @@ class WidgetsPage extends StatelessWidget {
                 ],
               ),
             ),
+            SizedBox(height: 18),
+            UpdatePanel(),
           ],
         ),
       ),
     ],
   );
+}
+
+/// 检查更新面板。
+///
+/// 版本来自本仓库的 GitHub Release。国内直连 GitHub 常超时，因此提供「加速前缀」
+/// ——很多镜像支持「前缀 + 原始地址」，例如 `https://ghfast.top/`。留空则直连。
+///
+/// 下载完成后交给系统安装器，**安装仍需用户在系统界面确认**。
+class UpdatePanel extends StatefulWidget {
+  const UpdatePanel({super.key});
+  @override
+  State<UpdatePanel> createState() => _UpdatePanelState();
+}
+
+class _UpdatePanelState extends State<UpdatePanel> {
+  final prefixController = TextEditingController();
+  bool checking = false;
+  bool installing = false;
+  String? status;
+  Map<String, dynamic>? release;
+
+  @override
+  void initState() {
+    super.initState();
+    loadPrefix();
+  }
+
+  @override
+  void dispose() {
+    prefixController.dispose();
+    super.dispose();
+  }
+
+  Future<void> loadPrefix() async {
+    try {
+      final result = await NativeApi.call('getUpdateProxyPrefix');
+      if (!mounted) return;
+      setState(() => prefixController.text = (result['prefix'] ?? '').toString());
+    } catch (_) {
+      // 读不到就用空（直连），不打扰用户。
+    }
+  }
+
+  Future<void> savePrefix() async {
+    try {
+      await NativeApi.call('saveUpdateProxyPrefix', {
+        'prefix': prefixController.text.trim(),
+      });
+    } catch (caught) {
+      if (mounted) setState(() => status = caught.toString());
+    }
+  }
+
+  Future<void> check() async {
+    setState(() {
+      checking = true;
+      status = null;
+      release = null;
+    });
+    try {
+      await savePrefix();
+      final result = await NativeApi.call('checkUpdate');
+      if (!mounted) return;
+      setState(() {
+        release = result;
+        status = result['has_update'] == true
+            ? '发现新版本 ${result['latest']}'
+            : '已是最新版本（${result['current']}）';
+      });
+    } catch (caught) {
+      if (mounted) setState(() => status = caught.toString());
+    }
+    if (mounted) setState(() => checking = false);
+  }
+
+  Future<void> install() async {
+    final url = (release?['url'] ?? '').toString();
+    final latest = (release?['latest'] ?? '').toString();
+    if (url.isEmpty) {
+      setState(() => status = '该版本没有可下载的 APK 附件');
+      return;
+    }
+    setState(() {
+      installing = true;
+      status = '正在下载 $latest …';
+    });
+    try {
+      await NativeApi.call('installUpdate', {'url': url, 'version': latest});
+      if (mounted) setState(() => status = '已交给系统安装器，请按提示确认安装');
+    } catch (caught) {
+      if (mounted) setState(() => status = caught.toString());
+    }
+    if (mounted) setState(() => installing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = (release?['latest'] ?? '').toString();
+    final hasUpdate = release?['has_update'] == true;
+    final notes = (release?['notes'] ?? '').toString().trim();
+    final size = (release?['size'] as num?)?.toDouble() ?? 0;
+
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.system_update_alt_rounded, color: mint, size: 20),
+              const SizedBox(width: 9),
+              const Text(
+                '检查更新',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const Spacer(),
+              if (checking || installing)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: prefixController,
+            style: const TextStyle(fontSize: 12.5),
+            decoration: InputDecoration(
+              isDense: true,
+              labelText: '加速前缀（留空直连）',
+              hintText: '例如 https://ghfast.top/',
+              hintStyle: const TextStyle(color: muted, fontSize: 12),
+              labelStyle: const TextStyle(color: muted, fontSize: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              FilledButton.tonal(
+                onPressed: checking || installing ? null : check,
+                child: const Text('检查'),
+              ),
+              const SizedBox(width: 10),
+              if (hasUpdate)
+                FilledButton(
+                  onPressed: installing ? null : install,
+                  child: Text(
+                    size > 0
+                        ? '下载安装（${(size / 1024 / 1024).toStringAsFixed(1)} MB）'
+                        : '下载安装',
+                  ),
+                ),
+            ],
+          ),
+          if (status != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              status!,
+              style: TextStyle(
+                color: hasUpdate ? ink : muted,
+                fontSize: 12,
+                height: 1.5,
+              ),
+            ),
+          ],
+          if (hasUpdate && notes.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 160),
+              child: SingleChildScrollView(
+                child: Text(
+                  notes,
+                  style: const TextStyle(color: muted, fontSize: 11, height: 1.5),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          const Text(
+            '安装时需要系统确认，应用无法静默安装。若下载失败，多为网络原因，'
+            '可填写可用的 GitHub 加速前缀后重试。',
+            style: TextStyle(color: muted, fontSize: 10.5, height: 1.5),
+          ),
+          if (latest.isEmpty && !hasUpdate && status == null)
+            const SizedBox.shrink(),
+        ],
+      ),
+    );
+  }
 }
 
 class FeatureCard extends StatelessWidget {
@@ -3929,7 +4125,8 @@ class _DrainChartPageState extends State<DrainChartPage> {
     return LiquidBackground(
       child: Scaffold(
         backgroundColor: Colors.transparent,
-        extendBodyBehindAppBar: true,
+        // 不要设 extendBodyBehindAppBar：那会让 AppBar 浮在内容之上，正好盖住
+        // 顶部的天数选择器，导致它点不动。
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,

@@ -5,6 +5,9 @@
     <!-- 电量巡检使用精确闹钟，避免 Doze 把检查推迟数小时。Android 12 起若系统
          未授予该权限，代码会自动退回允许空闲窗口的非精确闹钟。 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 应用内更新：下载新版 APK 后交给系统安装器。安装仍需用户在系统界面确认，
+         应用无法静默安装。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application
         android:label="郑大生活助手"
         android:name="com.chaquo.python.android.PyApplication"
@@ -71,6 +74,17 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- 应用内更新：把下载好的 APK 以 content:// 交给系统安装器。
+             裸 file:// 在 Android 7 起会抛 FileUriExposedException。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

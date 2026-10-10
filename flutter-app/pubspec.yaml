@@ -6,7 +6,7 @@ publish_to: 'none'
 # versionCode 必须保持递增：它降到比已安装版本小，覆盖安装会直接失败
 # （INSTALL_FAILED_VERSION_DOWNGRADE），只能卸载重装并丢失应用数据。
 # 因此这里从 21 继续，不要改小。
-version: 1.1.0+22
+version: 1.2.0+23
 
 environment:
   sdk: ^3.13.4
