@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">郑大生活助手</string>
+    <string name="schedule_widget_description">今日课程、时间与教室</string>
+    <string name="week_schedule_widget_description">整周课程、时间、地点与实验</string>
+    <string name="energy_widget_description">寝室照明与空调剩余电量</string>
+</resources>

@@ -1,0 +1,19 @@
+﻿name: zzu_life
+description: "郑大生活助手 Flutter 原生客户端"
+publish_to: 'none'
+# versionName+versionCode。
+# 重新从 1.0.0 开始计数（此前 3.x 是延续原生版的旧编号，对本项目没有意义）。
+# versionCode 必须保持递增：它降到比已安装版本小，覆盖安装会直接失败
+# （INSTALL_FAILED_VERSION_DOWNGRADE），只能卸载重装并丢失应用数据。
+# 因此这里从 21 继续，不要改小。
+version: 1.0.0+21
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

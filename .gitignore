@@ -1,0 +1,44 @@
+﻿# ===== Flutter / Dart =====
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.vscode/
+
+# ===== Android / Gradle =====
+.gradle/
+local.properties
+captures/
+*.hprof
+.cxx/
+
+# ===== Android 签名材料 =====
+# 密钥库与口令绝不能进仓库：一旦泄漏，任何人都能签出能以你的名义升级的包。
+# 模板见 flutter-app/android/keystore.properties.example
+*.keystore
+*.jks
+keystore.properties
+
+# ===== Python（Chaquopy 在构建时会生成）=====
+__pycache__/
+*.py[cod]
+
+# ===== 前端依赖（历史遗留的 node_modules，勿提交）=====
+node_modules/
+
+# ===== 本地产物 =====
+# release/ 存放构建好的 APK；APK 通过 GitHub Release 分发，不进版本库。
+release/
+*.apk
+*.aab
+
+# ===== 环境与编辑器 =====
+.env*
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+*.log
