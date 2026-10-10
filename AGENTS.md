@@ -108,8 +108,46 @@ flutter build apk --release --target-platform android-arm64
 - Version lives in `flutter-app/pubspec.yaml` as `versionName+versionCode`.
 - **`versionCode` must never decrease.** It is currently `23`. A version code lower than the installed one makes `adb install -r` fail with `INSTALL_FAILED_VERSION_DOWNGRADE`, and the only fix is uninstalling (which wipes app data).
 - `versionName` restarted at `1.0.0`. The earlier `3.x` series continued the numbering of a superseded native app and meant nothing for this project.
-- `release/` and `*.apk` are gitignored: **APKs are distributed as GitHub Release assets, not committed.** Push a `v*` tag to trigger `.github/workflows/build-apk.yaml`.
-- Signing: `flutter-app/android/keystore.properties` (gitignored, template `keystore.properties.example`). **Keep the keystore** — changing it breaks in-place upgrades for everyone. CI reads it from `ANDROID_KEYSTORE_BASE64` and friends; without those secrets Gradle falls back to debug signing.
+
+### When To Bump (read before touching the version)
+
+The version tracks **releases, not commits**. Bumping on every commit produces meaningless version numbers and useless Releases.
+
+- **Do not bump while iterating.** A feature split across five commits, or a day of debugging, needs one version change at most — at the end, when it is ready to ship.
+- **Patch (`1.2.0` → `1.2.1`)** for fixes, wording, and internal changes users would not notice.
+- **Minor (`1.2.0` → `1.3.0`)** for new user-visible features.
+- **Major (`1.3.0` → `2.0.0`)** for breaking changes — but note the app's real compatibility gate is `versionCode`, not `versionName`.
+- `versionCode` must increase whenever `versionName` does, and may also increase on its own for builds that are not user-facing.
+
+### Release Checklist
+
+1. Decide the bump from the rules above; set `version: <name>+<code>` in `flutter-app/pubspec.yaml`.
+2. `flutter analyze` clean, `python scripts/run_tests.py` green.
+3. `git tag -a v<name> -m "<release notes>"` and `git push origin v<name>`. **The tag is what publishes** — a push to `main` alone does not update the Release the in-app updater reads.
+4. Confirm the attached APK is signed with the project keystore, not a throwaway one:
+
+   ```powershell
+   apksigner verify --print-certs <downloaded.apk>
+   # must print 4858d66c6a5c5e426a36ed861aba68afb417668a896f3290a5962c36fc0752bc
+   ```
+
+   **A CI build with no keystore secret signs with a freshly generated debug key, so every run differs** — such an APK cannot upgrade the installed app, and the in-app updater silently fails for everyone. Check this digest before announcing a release.
+
+### Distribution
+
+- `release/` and `*.apk` are gitignored: **APKs are distributed as GitHub Release assets, not committed.**
+- Signing: `flutter-app/android/keystore.properties` (gitignored, template `keystore.properties.example`). **Keep the keystore** — changing it breaks in-place upgrades for everyone.
+- CI reads the keystore from repository secrets. Store the keystore as base64 in `ANDROID_KEYSTORE_BASE64` (plus `ANDROID_STORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`). Generate with:
+
+  ```powershell
+  [Convert]::ToBase64String([IO.File]::ReadAllBytes("<path>.keystore"))
+  ```
+
+  Secrets are read at build time only: **a Release built before the secrets were added keeps its throwaway signature forever.** Re-tag to rebuild.
+
+### Update Spam
+
+The in-app updater only runs when the user taps 检查 in the 组件 page — there is no automatic check and no launch popup, so shipping often does not nag anyone. If an automatic check is ever added, keep it silent (an indicator on the settings page, not a dialog) and rate-limit it; otherwise frequent releases become user-visible noise.
 
 ## Workspace Hygiene
 
