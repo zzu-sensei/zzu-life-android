@@ -3047,52 +3047,69 @@ class _EnergyPageState extends State<EnergyPage> {
                         ),
                       ),
                       const SizedBox(height: 12),
-                      GlassPanel(
-                        radius: 22,
-                        padding: const EdgeInsets.all(15),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Row(
-                              children: [
-                                Icon(
-                                  Icons.speed_rounded,
-                                  color: mint,
-                                  size: 20,
-                                ),
-                                SizedBox(width: 9),
-                                Text(
-                                  '耗电速度',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w800,
+                      // 整块可点：进入耗电曲线页面。右上角给出提示，避免只是
+                      // 「看起来像」可点而用户不知道。
+                      InkWell(
+                        borderRadius: BorderRadius.circular(22),
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                DrainChartPage(initialSamples: drainSamples),
+                          ),
+                        ),
+                        child: GlassPanel(
+                          radius: 22,
+                          padding: const EdgeInsets.all(15),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Row(
+                                children: [
+                                  Icon(
+                                    Icons.speed_rounded,
+                                    color: mint,
+                                    size: 20,
                                   ),
-                                ),
-                                Spacer(),
-                                Text(
-                                  '本次检查已记一次采样',
-                                  style: TextStyle(color: muted, fontSize: 10),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            if (drain.isEmpty)
-                              const Text(
-                                '还没有采样数据。多查几次电量（或开启后台巡检）'
-                                '即可估算还能用多久。',
-                                style: TextStyle(color: muted, fontSize: 12),
-                              )
-                            else
-                              for (final item in drain) ...[
-                                Text(
-                                  formatDrainLine(item),
-                                  style: TextStyle(
-                                    color: item.daysLeft == null ? muted : ink,
-                                    fontSize: 12,
-                                    height: 1.6,
+                                  SizedBox(width: 9),
+                                  Text(
+                                    '耗电速度',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                    ),
                                   ),
-                                ),
-                              ],
-                          ],
+                                  Spacer(),
+                                  Text(
+                                    '查看曲线',
+                                    style: TextStyle(color: muted, fontSize: 10),
+                                  ),
+                                  SizedBox(width: 2),
+                                  Icon(
+                                    Icons.chevron_right_rounded,
+                                    color: muted,
+                                    size: 18,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              if (drain.isEmpty)
+                                const Text(
+                                  '还没有采样数据。多查几次电量（或开启后台巡检）'
+                                  '即可估算还能用多久。',
+                                  style: TextStyle(color: muted, fontSize: 12),
+                                )
+                              else
+                                for (final item in drain) ...[
+                                  Text(
+                                    formatDrainLine(item),
+                                    style: TextStyle(
+                                      color: item.daysLeft == null ? muted : ink,
+                                      fontSize: 12,
+                                      height: 1.6,
+                                    ),
+                                  ),
+                                ],
+                            ],
+                          ),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -3832,4 +3849,477 @@ IconData meterIcon(String label) {
 String fallback(Object? value, String replacement) {
   final text = value?.toString().trim() ?? '';
   return text.isEmpty ? replacement : text;
+}
+
+
+/// 耗电速度可视化页面。
+///
+/// 展示采样到的「电量随时间变化」曲线与最小二乘拟合出的趋势线；趋势线的斜率
+/// 就是日均耗电量。估算复用 [estimateDrain]，因此与其他页面显示的数字一致。
+class DrainChartPage extends StatefulWidget {
+  const DrainChartPage({super.key, this.initialSamples = const []});
+
+  /// 从上一页带过来的采样，先渲染再刷新，避免打开时空白。
+  final List<Map> initialSamples;
+
+  @override
+  State<DrainChartPage> createState() => _DrainChartPageState();
+}
+
+class _DrainChartPageState extends State<DrainChartPage> {
+  late List<Map> samples = widget.initialSamples;
+  bool loading = false;
+  String? error;
+
+  /// 时间窗口（天）。0 表示全部。
+  int windowDays = drainWindowDays;
+
+  @override
+  void initState() {
+    super.initState();
+    refresh();
+  }
+
+  Future<void> refresh() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final result = await NativeApi.call('getEnergySamples');
+      if (!mounted) return;
+      setState(() {
+        samples = ((result['samples'] as List?) ?? const [])
+            .whereType<Map>()
+            .toList();
+      });
+    } catch (caught) {
+      if (mounted) setState(() => error = caught.toString());
+    }
+    if (mounted) setState(() => loading = false);
+  }
+
+  /// 按电表把窗口内的采样分组并排序。
+  Map<String, List<Map>> groupedSamples() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final cutoff = windowDays == 0 ? 0 : now - windowDays * 86400 * 1000;
+    final grouped = <String, List<Map>>{};
+    for (final raw in samples) {
+      final t = (raw['t'] as num?)?.toDouble();
+      final q = (raw['q'] as num?)?.toDouble();
+      if (t == null || q == null) continue;
+      if (t < cutoff) continue;
+      final id = (raw['id'] ?? '').toString();
+      grouped.putIfAbsent(id, () => []).add(raw);
+    }
+    for (final items in grouped.values) {
+      items.sort((a, b) => (a['t'] as num).compareTo(b['t'] as num));
+    }
+    return grouped;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final grouped = groupedSamples();
+    // 估算始终用固定窗口，保证与电量页上的数字一致。
+    final estimates = {
+      for (final e in estimateDrain(samples)) e.meterId: e,
+    };
+
+    return LiquidBackground(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        extendBodyBehindAppBar: true,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text(
+            '耗电速度',
+            style: TextStyle(fontWeight: FontWeight.w800, color: ink),
+          ),
+          iconTheme: const IconThemeData(color: ink),
+          actions: [
+            IconButton(
+              onPressed: loading ? null : refresh,
+              icon: const Icon(Icons.refresh_rounded),
+              tooltip: '重新读取采样',
+            ),
+          ],
+        ),
+        body: SafeArea(
+          top: false,
+          child: loading && samples.isEmpty
+              ? const Center(child: Loader())
+              : error != null && samples.isEmpty
+              ? ErrorState(message: error!, retry: refresh)
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                  children: [
+                    _windowSwitch(),
+                    const SizedBox(height: 12),
+                    if (grouped.isEmpty)
+                      const GlassPanel(
+                        radius: 20,
+                        padding: EdgeInsets.all(16),
+                        child: Text(
+                          '还没有采样数据。多查几次电量（或开启后台巡检）'
+                          '即可看到耗电曲线。',
+                          style: TextStyle(color: muted, fontSize: 12),
+                        ),
+                      )
+                    else
+                      for (final entry in grouped.entries) ...[
+                        _meterCard(
+                          entry.key,
+                          entry.value,
+                          estimates[entry.key],
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                    const SizedBox(height: 4),
+                    const Text(
+                      '趋势线由窗口内的采样做最小二乘拟合得到，斜率即日均耗电量。'
+                      '采样点越多、时间跨度越长，估算越准。',
+                      style: TextStyle(color: muted, fontSize: 11, height: 1.6),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _windowSwitch() {
+    const options = [
+      (1, '1 天'),
+      (3, '3 天'),
+      (7, '7 天'),
+      (30, '30 天'),
+      (0, '全部'),
+    ];
+    return GlassPanel(
+      radius: 18,
+      padding: const EdgeInsets.all(4),
+      child: Row(
+        children: [
+          for (final option in options)
+            Expanded(
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => setState(() => windowDays = option.$1),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    gradient: windowDays == option.$1
+                        ? LinearGradient(
+                            colors: [
+                              mint.withValues(alpha: .26),
+                              aqua.withValues(alpha: .14),
+                            ],
+                          )
+                        : null,
+                  ),
+                  child: Text(
+                    option.$2,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: windowDays == option.$1 ? ink : muted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _meterCard(String meterId, List<Map> items, DrainEstimate? estimate) {
+    final latest = (items.last['q'] as num).toDouble();
+    final label = (items.last['label'] ?? '寝室电表').toString();
+
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              Text(
+                '${number(latest)} 度',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${items.length} 个采样点',
+            style: const TextStyle(color: muted, fontSize: 11),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 170,
+            child: items.length < 2
+                ? const Center(
+                    child: Text(
+                      '至少需要两个采样点才能画曲线',
+                      style: TextStyle(color: muted, fontSize: 12),
+                    ),
+                  )
+                : CustomPaint(
+                    painter: _DrainChartPainter(
+                      points: [
+                        for (final raw in items)
+                          Offset(
+                            (raw['t'] as num).toDouble(),
+                            (raw['q'] as num).toDouble(),
+                          ),
+                      ],
+                      fitLine: (estimate != null &&
+                              estimate.ratePerDay.abs() >= drainNegligibleRate)
+                          ? estimate
+                          : null,
+                    ),
+                    size: Size.infinite,
+                  ),
+          ),
+          const SizedBox(height: 12),
+          _estimateRow(estimate),
+        ],
+      ),
+    );
+  }
+
+  Widget _estimateRow(DrainEstimate? estimate) {
+    if (estimate == null) {
+      return const Text(
+        '暂无法估算',
+        style: TextStyle(color: muted, fontSize: 12),
+      );
+    }
+    final rate = estimate.ratePerDay;
+    final rateText = rate.abs() < drainNegligibleRate
+        ? '几乎不耗电'
+        : '${number(rate.abs())} 度/天';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _stat('耗电速度', rateText),
+            const SizedBox(width: 18),
+            _stat(
+              '还能用',
+              estimate.daysLeft == null ? '--' : formatDays(estimate.daysLeft!),
+            ),
+          ],
+        ),
+        if (estimate.note.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            estimate.note,
+            style: const TextStyle(color: muted, fontSize: 11),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _stat(String title, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(color: muted, fontSize: 10.5)),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+        ),
+      ],
+    );
+  }
+}
+
+/// 画电量随时间变化的折线，并叠加拟合趋势线。
+///
+/// 时间轴用真实时间戳而不是序号，因此采样间隔不均匀时曲线形状仍然正确。
+class _DrainChartPainter extends CustomPainter {
+  _DrainChartPainter({required this.points, this.fitLine});
+
+  /// (时间戳毫秒, 电量)，按时间升序。
+  final List<Offset> points;
+
+  /// 有估算且耗电不可忽略时画趋势线。
+  final DrainEstimate? fitLine;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.length < 2) return;
+
+    const padLeft = 42.0;
+    const padRight = 10.0;
+    const padTop = 10.0;
+    const padBottom = 22.0;
+    final plotWidth = size.width - padLeft - padRight;
+    final plotHeight = size.height - padTop - padBottom;
+    if (plotWidth <= 0 || plotHeight <= 0) return;
+
+    final minT = points.first.dx;
+    final maxT = points.last.dx;
+    var minQ = points.first.dy;
+    var maxQ = points.first.dy;
+    for (final p in points) {
+      if (p.dy < minQ) minQ = p.dy;
+      if (p.dy > maxQ) maxQ = p.dy;
+    }
+    // 电量几乎不变时给一个最小高度，否则曲线会贴在一条直线上看不出形状。
+    var span = maxQ - minQ;
+    if (span < 0.5) {
+      final mid = (maxQ + minQ) / 2;
+      minQ = mid - 0.25;
+      maxQ = mid + 0.25;
+    } else {
+      minQ -= span * 0.08;
+      maxQ += span * 0.08;
+    }
+    span = maxQ - minQ;
+    final timeSpan = (maxT - minT) == 0 ? 1.0 : (maxT - minT);
+
+    Offset toCanvas(double t, double q) => Offset(
+      padLeft + (t - minT) / timeSpan * plotWidth,
+      padTop + (1 - (q - minQ) / span) * plotHeight,
+    );
+
+    final textPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    // 横向网格与左侧刻度
+    final gridPaint = Paint()
+      ..color = Colors.white.withValues(alpha: .10)
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 3; i++) {
+      final value = minQ + span * i / 3;
+      final y = padTop + (1 - (value - minQ) / span) * plotHeight;
+      canvas.drawLine(
+        Offset(padLeft, y),
+        Offset(size.width - padRight, y),
+        gridPaint,
+      );
+      textPainter.text = TextSpan(
+        text: value.toStringAsFixed(1),
+        style: const TextStyle(color: muted, fontSize: 9),
+      );
+      textPainter.layout();
+      textPainter.paint(
+        canvas,
+        Offset(padLeft - textPainter.width - 5, y - textPainter.height / 2),
+      );
+    }
+
+    // 折线下方的渐变填充
+    final linePath = Path();
+    var first = true;
+    for (final p in points) {
+      final o = toCanvas(p.dx, p.dy);
+      if (first) {
+        linePath.moveTo(o.dx, o.dy);
+        first = false;
+      } else {
+        linePath.lineTo(o.dx, o.dy);
+      }
+    }
+    final fillPath = Path.from(linePath)
+      ..lineTo(padLeft + plotWidth, padTop + plotHeight)
+      ..lineTo(padLeft, padTop + plotHeight)
+      ..close();
+    canvas.drawPath(
+      fillPath,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            aqua.withValues(alpha: .30),
+            aqua.withValues(alpha: .02),
+          ],
+        ).createShader(Rect.fromLTWH(padLeft, padTop, plotWidth, plotHeight)),
+    );
+
+    // 趋势线：q(t) = latest - rate * (tLast - t)
+    final fit = fitLine;
+    if (fit != null) {
+      final perMs = fit.ratePerDay / (86400 * 1000);
+      final qFirst = fit.latest - perMs * (maxT - minT);
+      canvas.drawLine(
+        toCanvas(minT, qFirst),
+        toCanvas(maxT, fit.latest),
+        Paint()
+          ..color = mint.withValues(alpha: .9)
+          ..strokeWidth = 2,
+      );
+    }
+
+    // 实测折线
+    canvas.drawPath(
+      linePath,
+      Paint()
+        ..color = aqua
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    // 采样点
+    final dot = Paint()..color = Colors.white;
+    for (final p in points) {
+      canvas.drawCircle(toCanvas(p.dx, p.dy), 2.6, dot);
+    }
+
+    // 时间轴首尾标签
+    String stamp(double ms) {
+      final d = DateTime.fromMillisecondsSinceEpoch(ms.round());
+      final hh = d.hour.toString().padLeft(2, '0');
+      final mm = d.minute.toString().padLeft(2, '0');
+      return '${d.month}/${d.day} $hh:$mm';
+    }
+
+    textPainter.text = TextSpan(
+      text: stamp(minT),
+      style: const TextStyle(color: muted, fontSize: 9),
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(padLeft, size.height - textPainter.height),
+    );
+    textPainter.text = TextSpan(
+      text: stamp(maxT),
+      style: const TextStyle(color: muted, fontSize: 9),
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        size.width - padRight - textPainter.width,
+        size.height - textPainter.height,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_DrainChartPainter old) =>
+      old.points != points || old.fitLine != fitLine;
 }

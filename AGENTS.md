@@ -11,7 +11,7 @@
 
 | Path | What it is |
 | --- | --- |
-| `flutter-app/lib/main.dart` | The entire Flutter UI |
+| `flutter-app/lib/main.dart` | The entire Flutter UI. All page classes are top level here — put a new page in this file rather than a new one, so it can use the shared theme constants and helper widgets (`GlassPanel`, `LiquidBackground`, `Loader`, `ErrorState`, `number`, …) without extracting them. `DrainChartPage` (energy-drain chart) is the most recent addition. |
 | `flutter-app/android/app/src/main/python/mobile_bridge.py` | Channel entry points called from Java |
 | `flutter-app/android/app/src/main/python/mobile_zzupy.py` | School service clients (CAS, EAMS, e-card) |
 | `flutter-app/android/app/src/main/python/mobile_plan_page.py` | Training-plan page parsing |
@@ -97,7 +97,7 @@ flutter build apk --release --target-platform android-arm64
 ## Versioning And Release
 
 - Version lives in `flutter-app/pubspec.yaml` as `versionName+versionCode`.
-- **`versionCode` must never decrease.** It is currently `21`. A version code lower than the installed one makes `adb install -r` fail with `INSTALL_FAILED_VERSION_DOWNGRADE`, and the only fix is uninstalling (which wipes app data).
+- **`versionCode` must never decrease.** It is currently `22`. A version code lower than the installed one makes `adb install -r` fail with `INSTALL_FAILED_VERSION_DOWNGRADE`, and the only fix is uninstalling (which wipes app data).
 - `versionName` restarted at `1.0.0`. The earlier `3.x` series continued the numbering of a superseded native app and meant nothing for this project.
 - `release/` and `*.apk` are gitignored: **APKs are distributed as GitHub Release assets, not committed.** Push a `v*` tag to trigger `.github/workflows/build-apk.yaml`.
 - Signing: `flutter-app/android/keystore.properties` (gitignored, template `keystore.properties.example`). **Keep the keystore** — changing it breaks in-place upgrades for everyone. CI reads it from `ANDROID_KEYSTORE_BASE64` and friends; without those secrets Gradle falls back to debug signing.
