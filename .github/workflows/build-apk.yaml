@@ -1,4 +1,4 @@
-﻿name: Build APK
+name: Build APK
 
 # 触发方式：
 #   1. 推送形如 v3.5.8 的标签 —— 自动构建并发布 Release（附带 APK 供下载）
@@ -67,7 +67,24 @@ jobs:
             echo "未配置 ANDROID_KEYSTORE_BASE64，将使用 debug 签名。"
             exit 0
           fi
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > zzu-life.keystore
+          # 从终端或编辑器复制 3500 字符的长串时极易带进换行、回车或空格，
+          # 而 GNU base64 -d 遇到它们会直接报 "invalid input"。这里先剔除所有
+          # 空白字符再解码，避免因为一次粘贴失误就让整个发布失败。
+          cleaned="$(printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]')"
+          if ! printf '%s' "$cleaned" | base64 -d > zzu-life.keystore 2>/dev/null; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 不是合法的 Base64。"
+            echo "原始长度 ${#KEYSTORE_BASE64}，剔除空白后 ${#cleaned}。"
+            echo "请在仓库 Secrets 里重新粘贴：用 [Convert]::ToBase64String(...) 生成后，"
+            echo "从单行文件里整段复制，确保没有换行。"
+            exit 1
+          fi
+          if [ ! -s zzu-life.keystore ]; then
+            echo "::error::解码后的密钥库为空。"
+            exit 1
+          fi
+          # 明文比对容易出错，这里只回显长度，便于确认四个 Secret 都已填写。
+          echo "密钥库已还原：$(wc -c < zzu-life.keystore) 字节"
+          echo "口令长度 ${#STORE_PASSWORD} / 别名长度 ${#KEY_ALIAS} / 密钥口令长度 ${#KEY_PASSWORD}"
           {
             echo "storeFile=$PWD/zzu-life.keystore"
             echo "storePassword=$STORE_PASSWORD"
