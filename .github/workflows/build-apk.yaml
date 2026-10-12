@@ -1,20 +1,39 @@
 name: Build APK
 
 # 触发方式：
-#   1. 推送形如 v3.5.8 的标签 —— 自动构建并发布 Release（附带 APK 供下载）
-#   2. 手动触发 —— 填一个标签名即可发布，留空则只上传构建产物
+#   1. 推送形如 v1.3.0 的标签 —— 自动构建并发布 Release（附带 APK 供下载）
+#   2. 手动触发 + 选「升级级别」 —— 一键发版：自动改 pubspec 版本号、提交、打标签，
+#      再构建发布。全程不需要本地终端。
+#   3. 手动触发 + 只填「已有标签名」 —— 按该标签发布；留空则只构建、不发 Release
+#
+# 一键发版必须从 main 分支触发，且 versionCode 只增不减（见 AGENTS.md 的发布约定）。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      bump:
+        description: "一键发版：先按这个级别升版本号，再提交、打标签、构建发布"
+        required: true
+        default: none
+        type: choice
+        options: [none, patch, minor, major]
+      version:
+        description: "一键发版：直接指定版本号（例如 2.0.0）。填了就忽略上面的升级级别"
+        required: false
+        type: string
       tag:
-        description: "发布用的标签名（例如 v3.5.8）。留空则只构建、不发 Release"
+        description: "仅发布：按这个已有标签发布（例如 v1.3.0）。留空则只构建、不发 Release"
         required: false
         type: string
 
 permissions:
   contents: write
+
+# 发版不能并发：两个 run 同时改 pubspec / 打标签会互相踩。
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,6 +41,96 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # 一键发版要提交、打标签、生成 Release 说明，需要完整历史。
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # 一键发版：改 pubspec 版本号 → 提交并推回 main → 打标签
+      #
+      # 为什么和构建放在同一个工作流里：用 GITHUB_TOKEN 推出去的标签**不会**再触发
+      # 另一个工作流（GitHub 的既定行为），所以「推标签 → 触发构建」这条链在自动发版
+      # 时走不通。放在同一个 run 里改完版本号直接往下构建即可，而且这样 APK 里报告的
+      # versionName 与标签必然一致——不一致会让 App 的更新检查陷入死循环。
+      # ------------------------------------------------------------------
+      - name: Bump version and tag
+        id: bump
+        if: github.event_name == 'workflow_dispatch' && (inputs.bump != 'none' || inputs.version != '')
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "::error::一键发版只能从 main 分支触发，当前是 ${GITHUB_REF_NAME}。"
+            exit 1
+          fi
+
+          file=flutter-app/pubspec.yaml
+          current="$(grep -m1 '^version:' "$file" | awk '{print $2}')"
+          name="${current%%+*}"
+          code="${current##*+}"
+
+          if [ -n "$EXPLICIT" ]; then
+            next="${EXPLICIT#v}"
+          else
+            IFS=. read -r major minor patch <<< "$name"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "::error::未知的升级级别：$BUMP"; exit 1 ;;
+            esac
+            next="${major}.${minor}.${patch}"
+          fi
+
+          if ! printf '%s' "$next" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::版本号格式不合法：${next}（应为 x.y.z）"
+            exit 1
+          fi
+
+          # versionCode 只增不减：降级会让 adb install -r 直接失败。
+          nextcode=$((code + 1))
+          tag="v${next}"
+
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::标签 ${tag} 已存在，请换一个版本号或改用其它升级级别。"
+            exit 1
+          fi
+
+          sed -i "s|^version: .*|version: ${next}+${nextcode}|" "$file"
+          grep -m1 '^version:' "$file"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "chore(release): ${tag}"
+          # checkout 出来的可能是游离 HEAD，所以显式推到 main。
+          # 如果 main 有分支保护规则挡住了这次推送，这里会失败——那属于仓库设置，不是脚本问题。
+          git push origin HEAD:main
+
+          git tag -a "${tag}" -m "Release ${tag}"
+          git push origin "${tag}"
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "已提交并推送标签 ${tag}（版本 ${next}+${nextcode}）"
+
+      # 统一判定「这次要发布哪个标签」：标签推送用 ref_name，一键发版用上一步算出的
+      # 标签，仅发布用输入框。三者都为空时只构建、不发 Release。
+      - name: Resolve release tag
+        id: rel
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${{ steps.bump.outputs.tag }}" ]; then
+            tag="${{ steps.bump.outputs.tag }}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "本次发布标签：${tag:-（不发布，只构建）}"
 
       # Chaquopy 要求 Python 3.12，而 ubuntu-latest 默认是 3.13，
       # 因此必须显式安装并把实际路径交给 CHAQUOPY_BUILD_PYTHON。
@@ -118,11 +227,11 @@ jobs:
           compression-level: 0
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        if: steps.rel.outputs.tag != ''
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-          name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: ${{ steps.rel.outputs.tag }}
           files: ${{ steps.apk.outputs.path }}
           generate_release_notes: true
           fail_on_unmatched_files: true

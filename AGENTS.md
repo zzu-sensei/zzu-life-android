@@ -21,7 +21,7 @@
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorScheduler.java` | Background jobs (grade / energy checks) |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorSettings.java` | SharedPreferences-backed settings |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/UpdateChecker.java` | In-app update: queries the GitHub Release, downloads the APK via an optional URL prefix, hands it to the system installer |
-| `.github/workflows/build-apk.yaml` | Builds and publishes the APK on `v*` tags |
+| `.github/workflows/build-apk.yaml` | Builds and publishes the APK on `v*` tags; `workflow_dispatch` also does one-click releases (bump version → commit → tag → build → publish) |
 | `.github/workflows/ci.yaml` | `flutter analyze` on push/PR |
 | `scripts/test_mobile_plan.py` | Offline regression check for the plan parser |
 
@@ -127,9 +127,24 @@ The version tracks **releases, not commits**. Bumping on every commit produces m
 
 ### Release Checklist
 
+Two ways to ship. Both end in the same place: a `v*` tag whose APK is attached to a GitHub Release.
+
+**A. One click (no local terminal) — recommended.** Actions → *Build APK* → *Run workflow*, on `main`:
+
+- pick `bump` (`patch` / `minor` / `major`), or fill `version` with an explicit `x.y.z`;
+- the workflow bumps `flutter-app/pubspec.yaml` (versionCode +1), commits it, pushes `main`, creates and pushes the tag, then builds and publishes — all in the same run;
+- leave both empty and it only builds an artifact, no Release.
+
+The bump and the build must stay in the same run: **a tag pushed with `GITHUB_TOKEN` does not trigger another workflow**, so a separate "tag it, then let the tag build" workflow would silently do nothing.
+
+**B. By hand**
+
 1. Decide the bump from the rules above; set `version: <name>+<code>` in `flutter-app/pubspec.yaml`.
 2. `flutter analyze` clean, `python scripts/run_tests.py` green.
 3. `git tag -a v<name> -m "<release notes>"` and `git push origin v<name>`. **The tag is what publishes** — a push to `main` alone does not update the Release the in-app updater reads.
+
+**Either way, before announcing the release:**
+
 4. Confirm the attached APK is signed with the project keystore, not a throwaway one:
 
    ```powershell
@@ -138,6 +153,8 @@ The version tracks **releases, not commits**. Bumping on every commit produces m
    ```
 
    **A CI build with no keystore secret signs with a freshly generated debug key, so every run differs** — such an APK cannot upgrade the installed app, and the in-app updater silently fails for everyone. Check this digest before announcing a release.
+
+5. Confirm the APK's `versionName` equals the tag. If they disagree the in-app updater loops forever: it keeps offering an update that installs a build reporting the old version.
 
 ### Distribution
 
