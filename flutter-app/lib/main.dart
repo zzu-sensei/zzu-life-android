@@ -489,6 +489,28 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int index = 1;
 
+  @override
+  void initState() {
+    super.initState();
+    checkUpdateInBackground();
+  }
+
+  /// 打开应用时静默检查一次更新（后端按 48 小时节流，失败也不打扰）。
+  ///
+  /// 结果存在本地，由「更多」面板里那行「检查更新」展示。只有当真的发现新版本、
+  /// 而通知又没发出去（多半是没给通知权限）时，才顺便申请一次权限——不会没事弹框。
+  Future<void> checkUpdateInBackground() async {
+    try {
+      final result = await NativeApi.call('autoCheckUpdate');
+      if (!mounted) return;
+      if (result['has_update'] == true && result['notified'] != true) {
+        await NativeApi.call('requestUpdateNotifyPermission');
+      }
+    } catch (_) {
+      // 更新检查失败不打扰用户。
+    }
+  }
+
   Future<void> confirmLogout() async {
     final continueLogout = await showDialog<bool>(
       context: context,
@@ -535,7 +557,6 @@ class _HomeShellState extends State<HomeShell> {
       const GradesHubPage(),
       const SchedulePage(),
       const EnergyPage(),
-      const WidgetsPage(),
     ];
     return LiquidBackground(
       child: Scaffold(
@@ -591,6 +612,11 @@ class _HomeShellState extends State<HomeShell> {
                       ),
                     ),
                     IconButton.filledTonal(
+                      onPressed: () => MoreSheet.show(context),
+                      icon: const Icon(Icons.more_horiz_rounded, size: 20),
+                    ),
+                    const SizedBox(width: 6),
+                    IconButton.filledTonal(
                       onPressed: confirmLogout,
                       icon: const Icon(Icons.logout_rounded, size: 20),
                     ),
@@ -623,10 +649,9 @@ class GlassNavigation extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const items = [
-      (Icons.school_outlined, Icons.school_rounded, '成绩'),
+      (Icons.school_outlined, Icons.school_rounded, '学习'),
       (Icons.calendar_month_outlined, Icons.calendar_month_rounded, '课表'),
       (Icons.bolt_outlined, Icons.bolt_rounded, '电费'),
-      (Icons.widgets_outlined, Icons.widgets_rounded, '组件'),
     ];
     return SafeArea(
       minimum: const EdgeInsets.fromLTRB(14, 0, 14, 10),
@@ -1288,14 +1313,17 @@ class _GradeCardState extends State<GradeCard> {
     );
   }
 }
-/// 「成绩」入口的双标签容器：成绩 / 培养计划。
+/// 「学习」入口的多标签容器：成绩 / 考试 / 培养计划。
 ///
-/// 不往底部导航加第 5 个标签（窄屏会挤），而是把这个入口做成两个子页面。
+/// 不往底部导航加第 5 个标签（窄屏会挤），而是把这个入口做成几个子页面。
 class GradesHubPage extends StatefulWidget {
   const GradesHubPage({super.key});
   @override
   State<GradesHubPage> createState() => _GradesHubPageState();
 }
+
+/// 学习入口下的标签名，顺序与 [IndexedStack] 的子页一一对应。
+const List<String> studyTabs = ['成绩', '考试', '培养计划'];
 
 class _GradesHubPageState extends State<GradesHubPage> {
   int tab = 0;
@@ -1310,7 +1338,7 @@ class _GradesHubPageState extends State<GradesHubPage> {
             padding: const EdgeInsets.all(5),
             child: Row(
               children: [
-                for (var i = 0; i < 2; i++)
+                for (var i = 0; i < studyTabs.length; i++)
                   Expanded(
                     child: InkWell(
                       borderRadius: BorderRadius.circular(15),
@@ -1330,7 +1358,7 @@ class _GradesHubPageState extends State<GradesHubPage> {
                               : null,
                         ),
                         child: Text(
-                          i == 0 ? '成绩' : '培养计划',
+                          studyTabs[i],
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontWeight: FontWeight.w800,
@@ -1348,10 +1376,238 @@ class _GradesHubPageState extends State<GradesHubPage> {
         Expanded(
           child: IndexedStack(
             index: tab,
-            children: const [GradesPage(), ProgramPlanPage()],
+            children: const [GradesPage(), ExamPage(), ProgramPlanPage()],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 考试安排（独立页面）。
+///
+/// 数据来自教务「考试信息」页面：考试时间、地点、座位号都由教务给出，客户端只做
+/// 展示。学期下拉也来自教务页面，默认选取最近一个有考试安排的学期。
+class ExamPage extends StatefulWidget {
+  const ExamPage({super.key});
+  @override
+  State<ExamPage> createState() => _ExamPageState();
+}
+
+class _ExamPageState extends State<ExamPage> {
+  List<Map> semesters = [];
+  String? semesterId;
+  List<Map>? exams;
+  bool loading = true;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load({String? semester}) async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final result = await NativeApi.call('getExams', {
+        'semester_id': semester ?? '',
+      });
+      if (!mounted) return;
+      final target = result['semester'];
+      setState(() {
+        semesters = ((result['semesters'] as List?) ?? const [])
+            .whereType<Map>()
+            .toList();
+        semesterId = target is Map ? target['id']?.toString() : null;
+        exams = ((result['exams'] as List?) ?? const [])
+            .whereType<Map>()
+            .toList();
+      });
+    } catch (caught) {
+      if (mounted) setState(() => error = caught.toString());
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        PageHeader(
+          eyebrow: 'Exams',
+          title: '考试安排',
+          subtitle: '考试时间、地点与座位号来自本科教务',
+          action: IconButton.filledTonal(
+            onPressed: loading ? null : () => load(semester: semesterId),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ),
+        if (semesters.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: _semesterPicker(),
+          ),
+        Expanded(
+          child: loading
+              ? const Center(child: Loader())
+              : error != null
+              ? ErrorState(
+                  message: error!,
+                  retry: () => load(semester: semesterId),
+                )
+              : _examList(),
+        ),
+      ],
+    );
+  }
+
+  Widget _semesterPicker() {
+    return GlassPanel(
+      radius: 18,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: semesterId,
+          isExpanded: true,
+          dropdownColor: deep,
+          iconEnabledColor: mint,
+          style: const TextStyle(
+            color: ink,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+          items: [
+            for (final semester in semesters)
+              DropdownMenuItem<String>(
+                value: semester['id']?.toString(),
+                child: Text((semester['name'] ?? '未知学期').toString()),
+              ),
+          ],
+          onChanged: loading
+              ? null
+              : (value) {
+                  if (value == null || value == semesterId) return;
+                  setState(() => semesterId = value);
+                  load(semester: value);
+                },
+        ),
+      ),
+    );
+  }
+
+  Widget _examList() {
+    final list = exams ?? const <Map>[];
+    if (list.isEmpty) {
+      return const EmptyState(
+        Icons.event_busy_outlined,
+        '这个学期还没有考试安排',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => load(semester: semesterId),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+        children: [
+          for (final exam in list) ...[
+            _examCard(exam),
+            const SizedBox(height: 10),
+          ],
+          const Text(
+            '考试信息由教务发布，如有调整以教务系统为准。',
+            style: TextStyle(color: muted, fontSize: 11, height: 1.6),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _examCard(Map exam) {
+    final finished = exam['finished'] == true;
+    final status = (exam['status_label'] ?? '未知').toString();
+    final date = (exam['date'] ?? '').toString();
+    final start = (exam['start_time'] ?? '').toString();
+    final end = (exam['end_time'] ?? '').toString();
+    final timeText = date.isEmpty ? '时间待定' : '$date $start-$end';
+
+    final details = <(IconData, String)>[
+      (Icons.schedule_rounded, timeText),
+      if ((exam['place'] ?? '').toString().isNotEmpty)
+        (Icons.place_outlined, exam['place'].toString()),
+      if ((exam['seat_no'] ?? '').toString().isNotEmpty)
+        (Icons.event_seat_outlined, '座位 ${exam['seat_no']}'),
+      if ((exam['exam_type'] ?? '').toString().isNotEmpty)
+        (Icons.assignment_outlined, exam['exam_type'].toString()),
+    ];
+
+    return GlassPanel(
+      radius: 20,
+      padding: const EdgeInsets.all(15),
+      tint: finished ? null : mint,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  (exam['course_name'] ?? '未知课程').toString(),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 9,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: finished
+                      ? Colors.white.withValues(alpha: .10)
+                      : mint.withValues(alpha: .20),
+                ),
+                child: Text(
+                  finished ? '已考' : status,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: finished ? muted : mint,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          for (final detail in details)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(detail.$1, size: 15, color: muted),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      detail.$2,
+                      style: const TextStyle(
+                        color: muted,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -3361,61 +3617,512 @@ class MeterCard extends StatelessWidget {
   }
 }
 
-class WidgetsPage extends StatelessWidget {
-  const WidgetsPage({super.key});
+/// 顶部「更多」菜单：收纳校园网入口、检查更新和桌面小组件提示。
+///
+/// 这些原本挂在独立的「组件」页里，但那个页面主要是「一键添加小组件」，
+/// 而 Android 并没有打开小组件选择器的公开 API（requestPinAppWidget 只对
+/// 支持的桌面生效），入口价值有限，所以收进这里，底部导航只留 学习 / 课表 / 电费。
+class MoreSheet extends StatelessWidget {
+  const MoreSheet({super.key});
+
+  static Future<void> show(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => const MoreSheet(),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      const PageHeader(
-        eyebrow: 'Home Screen',
-        title: '桌面小组件',
-        subtitle: '不用打开应用，也能快速查看',
+  Widget build(BuildContext context) => SafeArea(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+      child: GlassPanel(
+        radius: 26,
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '更多',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
+            ),
+            const SizedBox(height: 12),
+            _MoreTile(
+              icon: Icons.wifi_rounded,
+              title: '校园网',
+              subtitle: '余额、流量、在线设备（需在校园网内）',
+              onTap: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const NetworkPage()),
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            const UpdatePanel(),
+            const SizedBox(height: 14),
+            const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.touch_app_outlined, color: mint, size: 18),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '桌面小组件：长按桌面空白处，选择「小组件」，找到「郑大生活助手」即可添加。',
+                    style: TextStyle(color: muted, fontSize: 12.5, height: 1.5),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
-      Expanded(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
-          children: const [
-            FeatureCard(Icons.today_rounded, '今日课表', '显示当天课程、时间与教室，点按即可刷新。', [
-              mint,
-              aqua,
-            ]),
-            SizedBox(height: 12),
-            FeatureCard(
-              Icons.view_week_rounded,
-              '整周课表',
-              '按星期显示整周课程、地点和实验课，可调整组件高度。',
-              [Color(0xFF73A7F0), Color(0xFFD16F9A)],
+    ),
+  );
+}
+
+/// 「更多」菜单里的一行入口。
+class _MoreTile extends StatelessWidget {
+  const _MoreTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    borderRadius: BorderRadius.circular(18),
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+      child: Row(
+        children: [
+          Icon(icon, color: aqua),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(color: muted, fontSize: 12),
+                ),
+              ],
             ),
-            SizedBox(height: 12),
-            FeatureCard(
-              Icons.electric_meter_outlined,
-              '寝室电量',
-              '分别显示照明和空调剩余电量，不混用电表 ID。',
-              [aqua, Color(0xFFA594FF)],
+          ),
+          const Icon(Icons.chevron_right_rounded, color: muted),
+        ],
+      ),
+    ),
+  );
+}
+
+/// 校园网账户（独立页面）。
+///
+/// 自助服务系统只在**校园网内**可达，用的是**网络账号**（通常与统一认证账号相同，
+/// 但密码未必）。网络密码不写入任何存储，因此每次进页面都要重新输入。
+class NetworkPage extends StatefulWidget {
+  const NetworkPage({super.key});
+  @override
+  State<NetworkPage> createState() => _NetworkPageState();
+}
+
+class _NetworkPageState extends State<NetworkPage> {
+  final accountController = TextEditingController();
+  final passwordController = TextEditingController();
+  final baseController = TextEditingController(text: 'http://10.2.7.16:8080');
+  bool loading = false;
+  bool withHistory = false;
+  String? error;
+  Map<String, dynamic>? account;
+  List<Map> devices = [];
+  List<Map> history = [];
+
+  @override
+  void initState() {
+    super.initState();
+    prefillAccount();
+  }
+
+  @override
+  void dispose() {
+    accountController.dispose();
+    passwordController.dispose();
+    baseController.dispose();
+    super.dispose();
+  }
+
+  /// 用已登录的学号预填账号（网络账号通常和它相同，但不保证）。
+  Future<void> prefillAccount() async {
+    try {
+      final session = await NativeApi.call('session');
+      final value = (session['account'] ?? '').toString();
+      if (mounted && value.isNotEmpty) accountController.text = value;
+    } catch (_) {
+      // 拿不到就留空，让用户自己填。
+    }
+  }
+
+  Future<void> query() async {
+    if (accountController.text.trim().isEmpty ||
+        passwordController.text.isEmpty) {
+      setState(() => error = '请填写网络账号和密码');
+      return;
+    }
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final result = await NativeApi.call('getNetwork', {
+        'account': accountController.text.trim(),
+        'password': passwordController.text,
+        'base_url': baseController.text.trim(),
+        'history': withHistory ? '1' : '',
+      });
+      if (!mounted) return;
+      setState(() {
+        account = (result['account'] as Map?)?.cast<String, dynamic>();
+        devices = ((result['devices'] as List?) ?? const [])
+            .whereType<Map>()
+            .toList();
+        history = ((result['history'] as List?) ?? const [])
+            .whereType<Map>()
+            .toList();
+      });
+    } catch (caught) {
+      if (mounted) setState(() => error = caught.toString());
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LiquidBackground(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text(
+            '校园网',
+            style: TextStyle(fontWeight: FontWeight.w800, color: ink),
+          ),
+          iconTheme: const IconThemeData(color: ink),
+          actions: [
+            if (account != null)
+              IconButton(
+                onPressed: loading ? null : query,
+                icon: const Icon(Icons.refresh_rounded),
+                tooltip: '重新查询',
+              ),
+          ],
+        ),
+        body: SafeArea(
+          top: false,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+            children: [
+              _formCard(),
+              if (error != null) ...[
+                const SizedBox(height: 12),
+                GlassPanel(
+                  tint: const Color(0xFFFF796D),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.error_outline_rounded,
+                        color: Color(0xFFFF9E94),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          error!,
+                          style: const TextStyle(color: muted, height: 1.5),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (loading) ...[
+                const SizedBox(height: 30),
+                const Center(child: Loader()),
+              ] else if (account != null) ...[
+                const SizedBox(height: 14),
+                _accountCard(),
+                const SizedBox(height: 14),
+                _deviceSection(),
+                if (withHistory) ...[
+                  const SizedBox(height: 14),
+                  _historySection(),
+                ],
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _formCard() {
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('网络账号', style: TextStyle(color: muted, fontSize: 11)),
+          const SizedBox(height: 6),
+          _field(accountController, '学号 / 网络账号', false),
+          const SizedBox(height: 12),
+          const Text('网络密码', style: TextStyle(color: muted, fontSize: 11)),
+          const SizedBox(height: 6),
+          _field(passwordController, '校园网密码（不保存）', true),
+          const SizedBox(height: 12),
+          const Text('自助服务地址', style: TextStyle(color: muted, fontSize: 11)),
+          const SizedBox(height: 6),
+          _field(baseController, 'http://10.2.7.16:8080', false),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '同时拉取登录历史（较慢）',
+                  style: TextStyle(color: muted, fontSize: 12),
+                ),
+              ),
+              Switch(
+                value: withHistory,
+                onChanged: loading
+                    ? null
+                    : (value) => setState(() => withHistory = value),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.tonalIcon(
+              onPressed: loading ? null : query,
+              icon: const Icon(Icons.wifi_find_rounded),
+              label: const Text('查询'),
             ),
-            SizedBox(height: 18),
-            GlassPanel(
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(TextEditingController controller, String hint, bool obscure) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      enabled: !loading,
+      style: const TextStyle(fontSize: 14),
+      decoration: InputDecoration(
+        hintText: hint,
+        isDense: true,
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: .06),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+
+  Widget _accountCard() {
+    final data = account!;
+    final rows = <(String, String)>[
+      ('余额', '${number(data['left_money'])} 元'),
+      ('已用流量', '${number(data['use_flow'])} MB'),
+      ('剩余流量', '${number(data['left_flow'])} MB'),
+      ('累计上行', '${number(data['up_flow'])} MB'),
+      ('累计下行', '${number(data['down_flow'])} MB'),
+      ('同时在线上限', '${number(data['multi_login'])} 台'),
+      ('已绑定 IP', '${number(data['ip_count'])}/${number(data['ip_max_count'])}'),
+      if ((data['start_date'] ?? '').toString().isNotEmpty)
+        ('计费周期', '${data['start_date']} ~ ${data['stop_date'] ?? '-'}'),
+    ];
+
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(16),
+      tint: mint,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  (data['user_name'] ?? '校园网').toString(),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+              if ((data['service_name'] ?? '').toString().isNotEmpty)
+                Text(
+                  data['service_name'].toString(),
+                  style: const TextStyle(
+                    color: mint,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
+          if ((data['group_name'] ?? '').toString().isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '套餐：${data['group_name']}',
+              style: const TextStyle(color: muted, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 10),
+          for (final row in rows)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.touch_app_outlined, color: mint),
-                  SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      '长按桌面空白区域，选择“小组件”，然后搜索“郑大生活助手”。令牌失效时打开主应用重新登录。',
-                      style: TextStyle(color: muted, height: 1.6, fontSize: 13),
+                      row.$1,
+                      style: const TextStyle(color: muted, fontSize: 12),
+                    ),
+                  ),
+                  Text(
+                    row.$2,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
                     ),
                   ),
                 ],
               ),
             ),
-            SizedBox(height: 18),
-            UpdatePanel(),
-          ],
-        ),
+        ],
       ),
-    ],
-  );
+    );
+  }
+
+  Widget _deviceSection() {
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '当前在线设备（${devices.length}）',
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          if (devices.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text(
+                '没有在线设备。',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+            )
+          else
+            for (final device in devices)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      (device['ip'] ?? '-').toString(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${device['mac'] ?? '-'} · '
+                      '${(device['terminalType'] ?? '').toString().replaceFirst('#', '')}',
+                      style: const TextStyle(color: muted, fontSize: 11),
+                    ),
+                    Text(
+                      '登录于 ${device['loginTime'] ?? '-'}',
+                      style: const TextStyle(color: muted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+
+  Widget _historySection() {
+    return GlassPanel(
+      radius: 22,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '登录历史（${history.length}）',
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          if (history.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text(
+                '没有登录记录。',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+            )
+          else
+            for (final record in history)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${record['start_time'] ?? '-'} ~ '
+                      '${record['end_time'] ?? '-'}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${record['ip'] ?? '-'} · ${record['mac'] ?? '-'} · '
+                      '${record['terminal_type'] ?? '-'}',
+                      style: const TextStyle(color: muted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
 }
 
 /// 检查更新面板。
@@ -3437,10 +4144,14 @@ class _UpdatePanelState extends State<UpdatePanel> {
   String? status;
   Map<String, dynamic>? release;
 
+  /// 自动检查失败时的原因；为空表示上次自动检查正常（或还没跑过）。
+  String autoError = '';
+
   @override
   void initState() {
     super.initState();
     loadPrefix();
+    loadAuto();
   }
 
   @override
@@ -3457,6 +4168,38 @@ class _UpdatePanelState extends State<UpdatePanel> {
     } catch (_) {
       // 读不到就用空（直连），不打扰用户。
     }
+  }
+
+  /// 读取自动检查的结果（后端 48 小时节流，不会每次都发请求）。
+  ///
+  /// 这样打开「更多」面板就能直接看到有没有新版本，不必先手动点一次「检查」。
+  Future<void> loadAuto() async {
+    try {
+      final result = await NativeApi.call('autoCheckUpdate');
+      if (!mounted) return;
+      final error = (result['error'] ?? '').toString();
+      setState(() {
+        release = result;
+        autoError = error;
+        if (result['has_update'] == true) {
+          status = '自动检查：发现新版本 ${result['latest']}';
+        } else if (error.isEmpty) {
+          status = '自动检查：已是最新版本（${result['current']}）';
+        } else {
+          status = null;
+        }
+      });
+    } catch (_) {
+      // 自动检查失败不打扰：面板上仍可手动点「检查」。
+    }
+  }
+
+  String formatCheckTime(int millis) {
+    if (millis <= 0) return '';
+    final at = DateTime.fromMillisecondsSinceEpoch(millis);
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${at.year}-${two(at.month)}-${two(at.day)} '
+        '${two(at.hour)}:${two(at.minute)}';
   }
 
   Future<void> savePrefix() async {
@@ -3481,6 +4224,7 @@ class _UpdatePanelState extends State<UpdatePanel> {
       if (!mounted) return;
       setState(() {
         release = result;
+        autoError = (result['error'] ?? '').toString();
         status = result['has_update'] == true
             ? '发现新版本 ${result['latest']}'
             : '已是最新版本（${result['current']}）';
@@ -3517,6 +4261,7 @@ class _UpdatePanelState extends State<UpdatePanel> {
     final hasUpdate = release?['has_update'] == true;
     final notes = (release?['notes'] ?? '').toString().trim();
     final size = (release?['size'] as num?)?.toDouble() ?? 0;
+    final checkedAt = (release?['checked_at'] as num?)?.toInt() ?? 0;
 
     return GlassPanel(
       radius: 22,
@@ -3586,6 +4331,20 @@ class _UpdatePanelState extends State<UpdatePanel> {
               ),
             ),
           ],
+          if (checkedAt > 0) ...[
+            const SizedBox(height: 6),
+            Text(
+              '上次检查：${formatCheckTime(checkedAt)} · 自动检查每 48 小时一次',
+              style: const TextStyle(color: muted, fontSize: 11),
+            ),
+          ],
+          if (autoError.isNotEmpty && !hasUpdate) ...[
+            const SizedBox(height: 6),
+            Text(
+              '自动检查未成功：$autoError',
+              style: const TextStyle(color: muted, fontSize: 11, height: 1.4),
+            ),
+          ],
           if (hasUpdate && notes.isNotEmpty) ...[
             const SizedBox(height: 10),
             ConstrainedBox(
@@ -3610,62 +4369,6 @@ class _UpdatePanelState extends State<UpdatePanel> {
       ),
     );
   }
-}
-
-class FeatureCard extends StatelessWidget {
-  const FeatureCard(
-    this.icon,
-    this.title,
-    this.description,
-    this.colors, {
-    super.key,
-  });
-  final IconData icon;
-  final String title;
-  final String description;
-  final List<Color> colors;
-  @override
-  Widget build(BuildContext context) => GlassPanel(
-    child: Row(
-      children: [
-        Container(
-          width: 60,
-          height: 60,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: colors.map((e) => e.withValues(alpha: .26)).toList(),
-            ),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Icon(icon, color: colors.first, size: 30),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 17,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                description,
-                style: const TextStyle(
-                  color: muted,
-                  fontSize: 13,
-                  height: 1.45,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 class Metric extends StatelessWidget {
@@ -4383,6 +5086,32 @@ class _DrainChartPainter extends CustomPainter {
       if (p.dy < minQ) minQ = p.dy;
       if (p.dy > maxQ) maxQ = p.dy;
     }
+
+    // 趋势线的斜率来自固定窗口（默认 7 天）的拟合，却画在当前显示的时间跨度上。两者
+    // 不一致时——例如只显示 1 天，却拿 7 天的日均速度外推——端点会落到实测数据范围
+    // 之外，绿色的趋势线就会穿出坐标区下方。这里先把端点算出来并纳入纵轴范围，最多向
+    // 外扩展一倍数据跨度以免把曲线压扁；超出这个范围的情况交给后面的裁剪兜底。
+    final fit = fitLine;
+    double? trendQStart;
+    double? trendQEnd;
+    if (fit != null) {
+      final perMs = fit.ratePerDay / (86400 * 1000);
+      final start = fit.latest - perMs * (maxT - minT);
+      final end = fit.latest;
+      trendQStart = start;
+      trendQEnd = end;
+      final dataMin = minQ;
+      final dataMax = maxQ;
+      final dataSpan = dataMax - dataMin;
+      final guard = dataSpan > 0 ? dataSpan : 1.0;
+      for (final value in [start, end]) {
+        if (value >= dataMin - guard && value <= dataMax + guard) {
+          if (value < minQ) minQ = value;
+          if (value > maxQ) maxQ = value;
+        }
+      }
+    }
+
     // 电量几乎不变时给一个最小高度，否则曲线会贴在一条直线上看不出形状。
     var span = maxQ - minQ;
     if (span < 0.5) {
@@ -4426,6 +5155,11 @@ class _DrainChartPainter extends CustomPainter {
       );
     }
 
+    // 坐标区裁剪：填充、趋势线与实测曲线都只画在坐标区内，外推越界时被裁掉，
+    // 不会溢到坐标区下方。
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(padLeft, padTop, plotWidth, plotHeight));
+
     // 折线下方的渐变填充
     final linePath = Path();
     var first = true;
@@ -4456,13 +5190,10 @@ class _DrainChartPainter extends CustomPainter {
     );
 
     // 趋势线：q(t) = latest - rate * (tLast - t)
-    final fit = fitLine;
-    if (fit != null) {
-      final perMs = fit.ratePerDay / (86400 * 1000);
-      final qFirst = fit.latest - perMs * (maxT - minT);
+    if (fit != null && trendQStart != null && trendQEnd != null) {
       canvas.drawLine(
-        toCanvas(minT, qFirst),
-        toCanvas(maxT, fit.latest),
+        toCanvas(minT, trendQStart),
+        toCanvas(maxT, trendQEnd),
         Paint()
           ..color = mint.withValues(alpha: .9)
           ..strokeWidth = 2,
@@ -4484,6 +5215,8 @@ class _DrainChartPainter extends CustomPainter {
     for (final p in points) {
       canvas.drawCircle(toCanvas(p.dx, p.dy), 2.6, dot);
     }
+
+    canvas.restore();
 
     // 时间轴首尾标签
     String stamp(double ms) {

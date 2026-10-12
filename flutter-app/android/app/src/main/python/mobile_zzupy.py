@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import http.cookiejar
 import json
+import random
 import re
 import time
 import urllib.error
@@ -21,6 +22,8 @@ import gmalg
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+import mobile_exam_page
+import mobile_network_page
 import mobile_plan_page
 
 
@@ -41,6 +44,18 @@ def _records(value, depth: int = 0) -> list:
             if found or isinstance(value[key], list):
                 return found
     return []
+
+
+def _html_input_value(html: str, name: str) -> str:
+    """取 ``<input name=... value=...>`` 的 value；两种属性顺序都试一遍。"""
+    for pattern in (
+        rf'<input[^>]*name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']',
+        rf'<input[^>]*value=["\']([^"\']*)["\'][^>]*name=["\']{re.escape(name)}["\']',
+    ):
+        match = re.search(pattern, html, re.I)
+        if match:
+            return match.group(1)
+    return ""
 
 
 class HttpResponse:
@@ -69,13 +84,13 @@ class HttpClient:
         self.timeout = timeout
         self.cookies = http.cookiejar.CookieJar()
 
-    def _open(self, request, follow_redirects: bool):
+    def _open(self, request, follow_redirects: bool, timeout=None):
         handlers = [urllib.request.HTTPCookieProcessor(self.cookies)]
         if not follow_redirects:
             handlers.append(_NoRedirect())
         opener = urllib.request.build_opener(*handlers)
         try:
-            return HttpResponse(opener.open(request, timeout=self.timeout))
+            return HttpResponse(opener.open(request, timeout=timeout or self.timeout))
         except urllib.error.HTTPError as error:
             # A disabled redirect handler surfaces 30x as HTTPError; preserve headers.
             if 300 <= error.code < 400:
@@ -84,13 +99,15 @@ class HttpClient:
         except urllib.error.URLError as error:
             raise RuntimeError(f"无法连接学校服务器：{error.reason}") from error
 
-    def get(self, url: str, *, headers=None, params=None, follow_redirects=True):
+    def get(
+        self, url: str, *, headers=None, params=None, follow_redirects=True, timeout=None
+    ):
         if params:
             url += ("&" if "?" in url else "?") + urlencode(params)
         request = urllib.request.Request(url, headers=headers or {}, method="GET")
-        return self._open(request, follow_redirects)
+        return self._open(request, follow_redirects, timeout)
 
-    def post(self, url: str, *, headers=None, params=None, json=None):
+    def post(self, url: str, *, headers=None, params=None, json=None, form=None):
         if params:
             url += ("&" if "?" in url else "?") + urlencode(params)
         actual_headers = dict(headers or {})
@@ -98,6 +115,10 @@ class HttpClient:
         if json is not None:
             body = globals()["json"].dumps(json, ensure_ascii=False).encode()
             actual_headers["Content-Type"] = "application/json; charset=utf-8"
+        elif form is not None:
+            # 自助服务系统的登录接口吃的是表单，不是 JSON。
+            body = urlencode(form).encode()
+            actual_headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = urllib.request.Request(url, data=body, headers=actual_headers, method="POST")
         return self._open(request, True)
 
@@ -425,6 +446,8 @@ class MobileWebEASClient:
     PROGRAM_PREVIEW = (
         "https://jwxt.zzu.edu.cn/student/for-std/program-completion-preview"
     )
+    #: 考试信息页。列表数据由 ``.../info/{studentId}?semesterId=`` 返回。
+    EXAM_ARRANGE = "https://jwxt.zzu.edu.cn/student/for-std/exam-arrange"
     USER_AGENT = (
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
         "Chrome/131.0 Mobile Safari/537.36"
@@ -548,6 +571,25 @@ class MobileWebEASClient:
         plan = mobile_plan_page.parse_plan_page(response.text)
         return mobile_plan_page.summarize_plan(plan)
 
+    def get_exam_semesters(self) -> list[dict]:
+        """考试页可选的学期列表（学期下拉由页面服务端渲染）。"""
+        response = self.client.get(self.EXAM_ARRANGE, headers=self.headers)
+        response.raise_for_status()
+        if self._looks_like_login(response):
+            raise RuntimeError("教务网页会话已失效，请重新登录。")
+        return mobile_exam_page.parse_exam_semesters(response.text)
+
+    def get_exams(self, semester_id) -> list[dict]:
+        """指定学期的考试安排。数据内联在页面里，抓页面后解析。"""
+        url = f"{self.EXAM_ARRANGE}/info/{self.student_id}"
+        response = self.client.get(
+            url, headers=self.headers, params={"semesterId": semester_id}
+        )
+        response.raise_for_status()
+        if self._looks_like_login(response):
+            raise RuntimeError("教务网页会话已失效，请重新登录。")
+        return mobile_exam_page.parse_exams(response.text)
+
     def get_transcript(self) -> tuple[bytes, str]:
         response = self._get(
             "print-grade-zh",
@@ -565,6 +607,87 @@ class MobileWebEASClient:
         if not response.content.startswith(b"%PDF") and "application/pdf" not in content_type:
             raise RuntimeError("教务系统暂未返回可用的排名 PDF。")
         return response.content
+
+    def close(self):
+        self.client.close()
+
+
+class MobileNetworkClient:
+    """校园网自助服务系统（深澜 Self）。
+
+    只在**校园网内**可达，用的是**网络账号**（通常与统一认证账号相同，但密码未必）。
+    网络密码只在本次调用中使用，不写入任何存储。
+    """
+
+    LOGIN_PAGE = "/Self/login/"
+    RANDOM_CODE = "/Self/login/randomCode"
+    LOGIN_VERIFY = "/Self/login/verify"
+    ONLINE_LIST = "/Self/dashboard/getOnlineList"
+    ACCOUNT_PAGE = "/Self/setting/personList"
+    LOGIN_HISTORY = "/Self/dashboard/getLoginHistory"
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self.client = HttpClient(timeout=30)
+        self.logged_in = False
+
+    def _url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
+
+    def login(self, account: str, password: str) -> None:
+        page = self.client.get(self._url(self.LOGIN_PAGE), follow_redirects=False)
+        page.raise_for_status()
+        # 登录页里藏着一个 checkcode，值直接写在页面里，必须原样回传。
+        checkcode = _html_input_value(page.text, "checkcode")
+        if not checkcode:
+            raise RuntimeError("自助服务登录页里没有找到 checkcode。")
+
+        # 这一步不能少，否则 verify 会失败。
+        self.client.get(self._url(self.RANDOM_CODE), params={"t": str(random.random())})
+
+        response = self.client.post(
+            self._url(self.LOGIN_VERIFY),
+            form={
+                "foo": "",
+                "bar": "",
+                "checkcode": checkcode,
+                "account": account,
+                "password": password,
+                "code": "",
+            },
+        )
+        if "/Self/dashboard" not in str(response.url):
+            raise RuntimeError("校园网登录失败，请检查网络账号和密码。")
+        self.logged_in = True
+
+    def get_account(self) -> dict:
+        """账户概览（余额、流量、时长、套餐、同时在线上限等）。"""
+        response = self.client.get(self._url(self.ACCOUNT_PAGE))
+        response.raise_for_status()
+        return mobile_network_page.parse_account_page(response.text)
+
+    def get_online_devices(self) -> list[dict]:
+        response = self.client.get(
+            self._url(self.ONLINE_LIST),
+            params={
+                "t": str(random.random()),
+                "order": "asc",
+                "_": str(int(time.time())),
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, list) else []
+
+    def get_login_history(self) -> list[dict]:
+        """登录历史。接口较慢，单独放宽超时。"""
+        response = self.client.get(
+            self._url(self.LOGIN_HISTORY),
+            params={"t": str(random.random()), "_": str(int(time.time()))},
+            timeout=70,
+        )
+        response.raise_for_status()
+        return mobile_network_page.parse_login_history(response.text)
 
     def close(self):
         self.client.close()

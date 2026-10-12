@@ -44,6 +44,16 @@ final class MonitorSettings {
      */
     private static final String UPDATE_PROXY_PREFIX = "update_proxy_prefix";
 
+    /**
+     * 自动检查更新的状态：上次结果 + 下次允许检查的时间（JSON 字符串）。
+     *
+     * 结构由 {@link UpdateChecker#autoCheck} 写入，形如
+     * {@code {"has_update":false,"latest":"1.2.0","checked_at":1697000000000,
+     * "next_check_at":1697172800000}}。存成整串而不是拆成一堆键，是因为这些字段
+     * 总是一起读、一起写，拆开只会让 SharedPreferences 变乱。
+     */
+    private static final String UPDATE_STATE = "update_state";
+
     /** 采样保留天数。 */
     private static final int SAMPLE_RETENTION_DAYS = 30;
     /** 采样条数上限，避免 SharedPreferences 无限膨胀。 */
@@ -186,6 +196,15 @@ final class MonitorSettings {
         prefs(context).edit()
                 .putString(UPDATE_PROXY_PREFIX, prefix == null ? "" : prefix.trim())
                 .apply();
+    }
+
+    /** 自动检查更新保留下来的状态，从未检查过时为空串。 */
+    static String updateState(Context context) {
+        return prefs(context).getString(UPDATE_STATE, "");
+    }
+
+    static void saveUpdateState(Context context, String state) {
+        prefs(context).edit().putString(UPDATE_STATE, state == null ? "" : state).apply();
     }
 
 

@@ -214,9 +214,11 @@ def parse_js_literal(text: str) -> Any:
     return result
 
 
-def _slice_balanced(text: str, start: int) -> str | None:
-    """从 ``text[start] == '{'`` 起按括号配平切出对象文本，跳过字符串与转义。"""
-    if start >= len(text) or text[start] != "{":
+def _slice_balanced(
+    text: str, start: int, opening: str = "{", closing: str = "}"
+) -> str | None:
+    """从 ``text[start] == opening`` 起按括号配平切出文本，跳过字符串与转义。"""
+    if start >= len(text) or text[start] != opening:
         return None
     depth = 0
     quote = ""
@@ -233,13 +235,31 @@ def _slice_balanced(text: str, start: int) -> str | None:
             continue
         if char in "'\"":
             quote = char
-        elif char == "{":
+        elif char == opening:
             depth += 1
-        elif char == "}":
+        elif char == closing:
             depth -= 1
             if depth == 0:
                 return text[start: index + 1]
     return None
+
+
+def slice_js_array(text: str, start: int) -> str | None:
+    """从 ``text[start] == '['`` 起按方括号配平切出数组文本。
+
+    考试信息页把考试列表内联成 ``var studentExamInfoVms = [...]``，与培养计划页
+    一样是 JS 数据字面量，因此复用这里的切片与 ``parse_js_literal``。
+    """
+    return _slice_balanced(text, start, "[", "]")
+
+
+def slice_js_object(text: str, start: int) -> str | None:
+    """从 ``text[start] == '{'`` 起按花括号配平切出对象文本。
+
+    校园网自助服务页把账户对象内联成
+    ``(function (user) { window.user = user || {}; })({...});``。
+    """
+    return _slice_balanced(text, start, "{", "}")
 
 
 def extract_plan_model(html: str):

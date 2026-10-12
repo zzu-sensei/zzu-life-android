@@ -15,6 +15,8 @@
 | `flutter-app/android/app/src/main/python/mobile_bridge.py` | Channel entry points called from Java |
 | `flutter-app/android/app/src/main/python/mobile_zzupy.py` | School service clients (CAS, EAMS, e-card) |
 | `flutter-app/android/app/src/main/python/mobile_plan_page.py` | Training-plan page parsing |
+| `flutter-app/android/app/src/main/python/mobile_exam_page.py` | Exam-schedule page parsing; reuses `mobile_plan_page`'s data-literal JS parser and deliberately avoids `gmalg`, so it can be imported by the offline check |
+| `flutter-app/android/app/src/main/python/mobile_network_page.py` | Campus self-service (校园网) account + login-history parsing; same reuse/avoidance rules as above |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MainActivity.java` | Platform-channel dispatch |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorScheduler.java` | Background jobs (grade / energy checks) |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorSettings.java` | SharedPreferences-backed settings |
@@ -35,6 +37,8 @@
   ```
 
 - `scripts/test_mobile_plan.py` covers the training-plan parser: JS-literal parsing, `UNREPAIRED` classification, credit-weighted GPA, and semester grouping. Its fixtures mirror real EAMS responses.
+- `scripts/test_mobile_exam.py` covers the exam parser: field mapping, time splitting, status fallback, semester-dropdown parsing, and the empty-list-is-normal rule.
+- `scripts/test_mobile_network.py` covers the campus self-service parser: account field mapping, millisecond-timestamp conversion, the "never parse the password" rule, and the positional login-history array.
 - When you add a checker, name it `scripts/test_<feature>.py` with a `main()` that calls each case explicitly; the runner auto-discovers it.
 - **A test that cannot fail is worthless.** When fixing a bug, first reproduce the failure (temporarily revert the fix, confirm the new assertion fails), then restore the fix.
 - These checks only cover the Python side. The UI, the Java channel, and anything needing a real login still require `flutter analyze`, a build, and a device run.
@@ -64,6 +68,8 @@ Discovered against live responses. Do not "simplify" these away:
 - **Grade point averages must be credit-weighted.** A plain arithmetic mean is wrong.
 - **Parent and child plan modules are separate credit buckets.** Skipping a node because it has children silently drops its required credits.
 - **Reusing a CAS token requires restoring MFA state too**, or `login()` raises an MFA error.
+- **The campus self-service account object is server-rendered inline JS**, not a JSON API: `GET /Self/setting/personList` embeds `(function (user) { window.user = user || {}; })({...})`. **That page also inlines the account password in plaintext as `userPassword`** — `mobile_network_page` deliberately neither parses nor returns it. `GET /Self/dashboard/getLoginHistory` returns a **positional array** with no field names, so only confirmed positions are mapped and the untouched row is kept in `raw`. The self-service login posts **form-encoded** data, which is why `HttpClient.post` grew a `form=` argument.
+- **The exam schedule is another server-rendered inline-JS page**, not an XHR/JSON API. `GET /student/for-std/exam-arrange/info/{studentId}?semesterId={id}` returns HTML with `var studentExamInfoVms = [...]`; the semester dropdown comes from `GET /student/for-std/exam-arrange`. A semester with no exams yet returns an **empty array** — that is normal, not an error.
 
 ## Building The APK (Windows)
 
@@ -145,9 +151,16 @@ The version tracks **releases, not commits**. Bumping on every commit produces m
 
   Secrets are read at build time only: **a Release built before the secrets were added keeps its throwaway signature forever.** Re-tag to rebuild.
 
-### Update Spam
+### Update Checks
 
-The in-app updater only runs when the user taps 检查 in the 组件 page — there is no automatic check and no launch popup, so shipping often does not nag anyone. If an automatic check is ever added, keep it silent (an indicator on the settings page, not a dialog) and rate-limit it; otherwise frequent releases become user-visible noise.
+The in-app updater has two paths, both writing the same `update_state` blob in `MonitorSettings`:
+
+- **Automatic (silent)**: `UpdateChecker.autoCheck()` runs on app start and from the background monitoring alarm, throttled to **48 hours** via `next_check_at` (a failed check retries in 6 hours instead of 48). No dialog, no launch popup.
+- **Manual**: the 检查 button in the 更多 sheet (top-right, next to 退出登录) calls `checkNow()`, which ignores the throttle.
+
+When the **automatic** check finds a new version it posts **one local notification** on the `zzu_life_updates` channel (separate from the 成绩与电量提醒 channel, so users can mute updates alone). It is deduped by `notified_version` in `update_state`, so each version notifies **at most once**. If notification permission is missing the notification is skipped and `notified_version` is deliberately left unset — the app asks for POST_NOTIFICATIONS only when an update actually exists, and `notifyPendingUpdate()` fires the missed notification once permission is granted. Manual checks never notify (the user is already looking at the app).
+
+Keep it this way: shipping often must not nag, and frequent releases must not become user-visible noise.
 
 ## Workspace Hygiene
 

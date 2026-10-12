@@ -3,6 +3,7 @@ package cn.edu.zzu.life;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.print.PrintManager;
@@ -30,6 +31,8 @@ public class MainActivity extends FlutterActivity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private String pendingAccount = "";
     private static final int SAVE_FILE_REQUEST = 8104;
+    /** 申请通知权限，用于「发现新版本」的提醒。 */
+    private static final int REQUEST_UPDATE_NOTIFY = 8105;
     private MethodChannel.Result pendingSaveResult;
     private String pendingSaveContent;
     private WebView printingWebView;
@@ -87,11 +90,28 @@ public class MainActivity extends FlutterActivity {
         if ("checkUpdate".equals(call.method)) {
             executor.execute(() -> {
                 try {
-                    result.success(UpdateChecker.check(this).toString());
+                    result.success(UpdateChecker.checkNow(this).toString());
                 } catch (Exception error) {
                     result.error("UPDATE_CHECK", describe(error), null);
                 }
             });
+            return;
+        }
+        if ("autoCheckUpdate".equals(call.method)) {
+            // 静默的自动检查（48 小时节流）：只写状态，界面自己读，不弹任何东西。
+            executor.execute(() -> {
+                try {
+                    result.success(UpdateChecker.autoCheck(this).toString());
+                } catch (Exception error) {
+                    result.error("UPDATE_AUTO_CHECK", describe(error), null);
+                }
+            });
+            return;
+        }
+        if ("requestUpdateNotifyPermission".equals(call.method)) {
+            // 只有检测到新版本时前端才会调这里，所以不会无缘无故弹权限框。
+            requestUpdateNotifyPermission();
+            result.success("{\"ok\":true}");
             return;
         }
         if ("saveUpdateProxyPrefix".equals(call.method)) {
@@ -164,6 +184,9 @@ public class MainActivity extends FlutterActivity {
                 case "getProgramPlan":
                     payload = callSession("get_program_plan");
                     break;
+                case "getExams":
+                    payload = callSession("get_exams", string(args, "semester_id"));
+                    break;
                 case "getSchedule":
                     payload = callSession(
                         "get_schedule", number(args, "week"), number(args, "semester_id")
@@ -206,6 +229,16 @@ public class MainActivity extends FlutterActivity {
                 case "exportSchedule":
                     payload = callSession("export_schedule_ics");
                     break;
+                case "getNetwork":
+                    // 校园网用网络账号，不走统一认证，所以这里直接调 Python，不带会话。
+                    payload = PythonGateway.call(
+                        "get_network",
+                        string(args, "account"),
+                        string(args, "password"),
+                        string(args, "base_url"),
+                        string(args, "history")
+                    );
+                    break;
                 default:
                     throw new IllegalArgumentException("未知调用：" + call.method);
             }
@@ -230,6 +263,34 @@ public class MainActivity extends FlutterActivity {
             }
         }
         return payload;
+    }
+
+    /**
+     * 申请通知权限。
+     *
+     * 只在应用真的检测到新版本时才会被调到（见 requestUpdateNotifyPermission 通道），
+     * 因此不会在用户没更新可看的时候弹权限框。已经授权时直接把还没发出去的提醒补上。
+     */
+    private void requestUpdateNotifyPermission() {
+        if (Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) {
+            UpdateChecker.notifyPendingUpdate(this);
+            return;
+        }
+        requestPermissions(
+                new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                REQUEST_UPDATE_NOTIFY);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_UPDATE_NOTIFY) {
+            // 授权了就把这次「发现新版本」补成一条通知；拒绝了也不打扰。
+            UpdateChecker.notifyPendingUpdate(this);
+        }
     }
 
     private JSONObject callSession(String method, Object... args) throws Exception {

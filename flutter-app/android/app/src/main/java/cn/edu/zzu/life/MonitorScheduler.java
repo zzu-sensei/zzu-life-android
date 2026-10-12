@@ -106,6 +106,13 @@ final class MonitorScheduler {
                 result.put("message", error.getMessage() == null ? "检查失败" : error.getMessage());
             } catch (Exception ignored) {}
         } finally {
+            // 顺带静默检查一次更新（48 小时节流，不弹窗、不通知），这样即使不打开
+            // 应用也能拿到新版本状态。失败不影响巡检。
+            try {
+                UpdateChecker.autoCheck(context);
+            } catch (Exception ignored) {
+                // 更新检查失败与成绩/电量巡检无关，直接吞掉。
+            }
             // 单次闹钟不会自动重复，必须在这里接上下一环，否则巡检只跑一次。
             scheduleAfterRun(context);
         }

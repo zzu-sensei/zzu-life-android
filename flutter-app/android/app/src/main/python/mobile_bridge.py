@@ -19,9 +19,13 @@ from mobile_zzupy import (
     MobileCASClient,
     MobileEASClient,
     MobileECardClient,
+    MobileNetworkClient,
     MobileWebEASClient,
     discover_meter_energy,
 )
+
+#: 校园网自助服务系统默认地址（只在校园网内可达）。
+DEFAULT_NETWORK_BASE = "http://10.2.7.16:8080"
 
 
 _lock = threading.RLock()
@@ -453,6 +457,77 @@ def get_program_plan(account: str, user_token: str, refresh_token: str) -> str:
             web.close()
 
     return _with_cas(account, user_token, refresh_token, operation)
+
+
+def get_exams(
+    account: str,
+    user_token: str,
+    refresh_token: str,
+    semester_id: str = "",
+) -> str:
+    """获取考试安排（「学习」入口的考试标签用）。
+
+    网页端登录后先取学期下拉，再抓指定学期的「考试信息」页面并解析内联数据。
+    不指定学期时从最新学期开始找，取第一个有考试安排的学期（最新学期常常还没排考）。
+    """
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        web = MobileWebEASClient(cas)
+        try:
+            web.login()
+            semesters = web.get_exam_semesters()
+            target: dict[str, Any] | None = None
+            exams: list[dict[str, Any]] = []
+            if semester_id:
+                try:
+                    sid = int(semester_id)
+                except ValueError:
+                    raise RuntimeError(f"学期 ID 必须是数字：{semester_id}") from None
+                target = next(
+                    (item for item in semesters if item["id"] == sid),
+                    {"id": sid, "name": str(sid)},
+                )
+                exams = web.get_exams(sid)
+            else:
+                for candidate in semesters[:4]:
+                    exams = web.get_exams(candidate["id"])
+                    if exams:
+                        target = candidate
+                        break
+                if target is None and semesters:
+                    target = semesters[0]
+            return {"semesters": semesters, "semester": target, "exams": exams}
+        finally:
+            web.close()
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
+
+def get_network(
+    account: str,
+    password: str,
+    base_url: str = "",
+    history: str = "",
+) -> str:
+    """校园网账户概览 + 在线设备（可选登录历史）。
+
+    用的是**网络账号**，不走统一认证。网络密码只在本次调用中使用，不写入任何存储；
+    自助服务系统只在校园网内可达，不在校园网时登录会直接失败。
+    """
+    client = MobileNetworkClient((base_url or DEFAULT_NETWORK_BASE).strip())
+    try:
+        client.login(account, password)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "account": client.get_account(),
+            "devices": client.get_online_devices(),
+        }
+        # 登录历史接口很慢，只有用户主动要看时才拉。
+        payload["history"] = client.get_login_history() if history else []
+        return _json(payload)
+    except BaseException as exc:  # noqa: BLE001
+        return _error(exc)
+    finally:
+        client.close()
 
 
 def get_semesters(account: str, user_token: str, refresh_token: str) -> str:
