@@ -13,8 +13,8 @@
         android:name="com.chaquo.python.android.PyApplication"
         android:allowBackup="false"
         android:usesCleartextTraffic="false"
-        android:icon="@mipmap/ic_launcher_v6"
-        android:roundIcon="@mipmap/ic_launcher_v6">
+        android:icon="@mipmap/ic_launcher_v7"
+        android:roundIcon="@mipmap/ic_launcher_v7">
         <activity
             android:name=".MainActivity"
             android:exported="false"
@@ -37,7 +37,7 @@
             android:name=".LauncherV3"
             android:targetActivity=".MainActivity"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher_v6"
+            android:icon="@mipmap/ic_launcher_v7"
             android:label="郑大生活助手">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
