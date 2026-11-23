@@ -3,7 +3,7 @@
 ## Project Overview
 
 - This repository is the **Android client only** for Zhengzhou University services.
-- The Flutter UI lives in `flutter-app/lib/main.dart` (one large file; page classes are top level).
+- The Flutter UI uses a **Material Design 3 × Miuix (HyperOS)** modular layout under `flutter-app/lib/` (`main.dart`, `theme/`, `core/`, `widgets/`, `pages/`).
 - Business logic runs in an embedded **Chaquopy Python 3.12** runtime under `flutter-app/android/app/src/main/python/`. All requests go from the phone straight to the school services; there is no backend in this repository.
 - Android/Java side: `flutter-app/android/app/src/main/java/cn/edu/zzu/life/`.
 
@@ -11,15 +11,19 @@
 
 | Path | What it is |
 | --- | --- |
-| `flutter-app/lib/main.dart` | The entire Flutter UI. All page classes are top level here — put a new page in this file rather than a new one, so it can use the shared theme constants and helper widgets (`GlassPanel`, `LiquidBackground`, `Loader`, `ErrorState`, `number`, …) without extracting them. `DrainChartPage` (energy-drain chart) is the most recent addition. |
+| `flutter-app/lib/main.dart` | App entry point (`ZzuLifeApp`), `ThemeController` wiring, system overlay styling, and session restore |
+| `flutter-app/lib/theme/app_theme.dart` | M3 × Miuix light/dark `AppPalette`, `ContinuousRectangleBorder` squircle helpers (`miuixShape`), and `ThemeController` |
+| `flutter-app/lib/core/` | Shared non-UI logic: `native_api.dart`, `formatters.dart` (incl. credit-weighted GPA), `drain_estimator.dart`, `course_palette.dart` |
+| `flutter-app/lib/widgets/miuix_components.dart` | Reusable Miuix × M3 components (`MiuixCard`, `MiuixGroupedCard`, `MiuixTile`, `MiuixSegmentedControl`, `MiuixHeroBanner`, `showMiuixSheet`, `Loader`, `ErrorState`, `EmptyState`, …) |
+| `flutter-app/lib/pages/` | Modular pages: `login_page.dart`, `home_shell.dart` (4-tab navigation with lazy mounting), `schedule/` (`SchedulePage`, `ScheduleGrid`), `study/` (`StudyHubPage`, `GradesPage`, `ExamPage`, `ProgramPlanPage`), `energy/` (`EnergyPage`, `DrainChartPage`), `mine/` (`MinePage`, `NetworkPage`) |
 | `flutter-app/android/app/src/main/python/mobile_bridge.py` | Channel entry points called from Java |
 | `flutter-app/android/app/src/main/python/mobile_zzupy.py` | School service clients (CAS, EAMS, e-card) |
 | `flutter-app/android/app/src/main/python/mobile_plan_page.py` | Training-plan page parsing |
 | `flutter-app/android/app/src/main/python/mobile_exam_page.py` | Exam-schedule page parsing; reuses `mobile_plan_page`'s data-literal JS parser and deliberately avoids `gmalg`, so it can be imported by the offline check |
 | `flutter-app/android/app/src/main/python/mobile_network_page.py` | Campus self-service (校园网) account + login-history parsing; same reuse/avoidance rules as above |
-| `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MainActivity.java` | Platform-channel dispatch |
+| `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MainActivity.java` | Platform-channel dispatch (including `getThemeMode` / `saveThemeMode`) |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorScheduler.java` | Background jobs (grade / energy checks) |
-| `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorSettings.java` | SharedPreferences-backed settings |
+| `flutter-app/android/app/src/main/java/cn/edu/zzu/life/MonitorSettings.java` | SharedPreferences-backed settings (monitors, energy samples, update proxy/state, and `theme_mode`) |
 | `flutter-app/android/app/src/main/java/cn/edu/zzu/life/UpdateChecker.java` | In-app update: queries the GitHub Release, downloads the APK via an optional URL prefix, hands it to the system installer |
 | `.github/workflows/build-apk.yaml` | Builds and publishes the APK on `v*` tags; `workflow_dispatch` also does one-click releases (bump version → commit → tag → build → publish) |
 | `.github/workflows/ci.yaml` | `flutter analyze` on push/PR |
@@ -173,7 +177,7 @@ The bump and the build must stay in the same run: **a tag pushed with `GITHUB_TO
 The in-app updater has two paths, both writing the same `update_state` blob in `MonitorSettings`:
 
 - **Automatic (silent)**: `UpdateChecker.autoCheck()` runs on app start and from the background monitoring alarm, throttled to **48 hours** via `next_check_at` (a failed check retries in 6 hours instead of 48). No dialog, no launch popup.
-- **Manual**: the 检查 button in the 更多 sheet (top-right, next to 退出登录) calls `checkNow()`, which ignores the throttle.
+- **Manual**: the 检查更新 entry in the 我的 tab calls `checkNow()`, which ignores the throttle.
 
 When the **automatic** check finds a new version it posts **one local notification** on the `zzu_life_updates` channel (separate from the 成绩与电量提醒 channel, so users can mute updates alone). It is deduped by `notified_version` in `update_state`, so each version notifies **at most once**. If notification permission is missing the notification is skipped and `notified_version` is deliberately left unset — the app asks for POST_NOTIFICATIONS only when an update actually exists, and `notifyPendingUpdate()` fires the missed notification once permission is granted. Manual checks never notify (the user is already looking at the app).
 

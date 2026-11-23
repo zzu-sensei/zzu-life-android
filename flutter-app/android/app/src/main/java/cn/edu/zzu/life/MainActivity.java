@@ -130,6 +130,22 @@ public class MainActivity extends FlutterActivity {
             }
             return;
         }
+        if ("getThemeMode".equals(call.method)) {
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("ok", true);
+                payload.put("mode", MonitorSettings.themeMode(this));
+                result.success(payload.toString());
+            } catch (Exception error) {
+                result.error("THEME_MODE", describe(error), null);
+            }
+            return;
+        }
+        if ("saveThemeMode".equals(call.method)) {
+            MonitorSettings.saveThemeMode(this, call.argument("mode"));
+            result.success("{\"ok\":true}");
+            return;
+        }
         if ("installUpdate".equals(call.method)) {
             String url = call.argument("url");
             String version = call.argument("version");

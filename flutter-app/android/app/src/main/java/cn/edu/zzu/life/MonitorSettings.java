@@ -54,6 +54,9 @@ final class MonitorSettings {
      */
     private static final String UPDATE_STATE = "update_state";
 
+    /** 界面主题模式："system" / "light" / "dark"。 */
+    private static final String THEME_MODE = "theme_mode";
+
     /** 采样保留天数。 */
     private static final int SAMPLE_RETENTION_DAYS = 30;
     /** 采样条数上限，避免 SharedPreferences 无限膨胀。 */
@@ -205,6 +208,21 @@ final class MonitorSettings {
 
     static void saveUpdateState(Context context, String state) {
         prefs(context).edit().putString(UPDATE_STATE, state == null ? "" : state).apply();
+    }
+
+    /** 读取界面主题模式，默认为跟随系统。 */
+    static String themeMode(Context context) {
+        String mode = prefs(context).getString(THEME_MODE, "system");
+        if ("light".equals(mode) || "dark".equals(mode) || "system".equals(mode)) {
+            return mode;
+        }
+        return "system";
+    }
+
+    /** 保存界面主题模式（仅接受 light / dark / system，其余回落为 system）。 */
+    static void saveThemeMode(Context context, String mode) {
+        String normalized = ("light".equals(mode) || "dark".equals(mode)) ? mode : "system";
+        prefs(context).edit().putString(THEME_MODE, normalized).apply();
     }
 
 
