@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 import mobile_exam_page
 import mobile_network_page
 import mobile_plan_page
+import mobile_profile_page
 import mobile_room_page
 
 
@@ -454,6 +455,9 @@ class MobileWebEASClient:
     ROOM_BUILDINGS = "https://jwxt.zzu.edu.cn/student/ws/room/get-buildings"
     ROOM_UNITS = "https://jwxt.zzu.edu.cn/student/ws/room-borrow/get-unit-campus"
     ROOM_FREE_LIST = "https://jwxt.zzu.edu.cn/student/ws/room-borrow/free-list"
+    #: 教务学生端首页与个人头像（个人上传头像，非学籍证件照）。
+    HOME_PAGE = "https://jwxt.zzu.edu.cn/student/home"
+    MY_AVATAR = "https://jwxt.zzu.edu.cn/student/my/avatar"
     USER_AGENT = (
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
         "Chrome/131.0 Mobile Safari/537.36"
@@ -687,6 +691,46 @@ class MobileWebEASClient:
         if not response.content.startswith(b"%PDF") and "application/pdf" not in content_type:
             raise RuntimeError("教务系统暂未返回可用的排名 PDF。")
         return response.content
+
+    def get_personal_profile(self) -> dict:
+        """获取教务系统首页姓名及个人头像；未设置个人头像时不回退证件照。"""
+        response = self.client.get(self.HOME_PAGE, headers=self.headers)
+        response.raise_for_status()
+        if self._looks_like_login(response):
+            raise RuntimeError("教务网页会话已失效，请重新登录。")
+
+        profile = mobile_profile_page.parse_home_profile(response.text)
+        avatar_base64 = ""
+        avatar_mime = ""
+        if profile["has_portrait"]:
+            try:
+                avatar_resp = self.client.get(
+                    self.MY_AVATAR, headers=self.headers, timeout=15
+                )
+                content_type = str(avatar_resp.headers.get("content-type", ""))
+                if (
+                    avatar_resp.status_code == 200
+                    and not self._looks_like_login(avatar_resp)
+                    and mobile_profile_page.looks_like_image(
+                        avatar_resp.content, content_type
+                    )
+                ):
+                    avatar_mime = mobile_profile_page.detect_image_mime(
+                        avatar_resp.content
+                    )
+                    avatar_base64 = base64.b64encode(avatar_resp.content).decode(
+                        "ascii"
+                    )
+            except BaseException:
+                avatar_base64 = ""
+                avatar_mime = ""
+
+        return {
+            "name": profile["name"],
+            "has_portrait": bool(avatar_base64),
+            "avatar_base64": avatar_base64,
+            "avatar_mime": avatar_mime,
+        }
 
     def close(self):
         self.client.close()

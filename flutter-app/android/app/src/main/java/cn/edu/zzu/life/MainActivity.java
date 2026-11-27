@@ -20,6 +20,10 @@ import androidx.annotation.NonNull;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -38,6 +42,7 @@ public class MainActivity extends FlutterActivity {
     private static final int SAVE_FILE_REQUEST = 8104;
     /** 申请通知权限，用于「发现新版本」的提醒。 */
     private static final int REQUEST_UPDATE_NOTIFY = 8105;
+    private static final String PROFILE_CACHE_FILE = "user_profile_cache.json";
     private MethodChannel.Result pendingSaveResult;
     private String pendingSaveContent;
     private WebView printingWebView;
@@ -78,6 +83,7 @@ public class MainActivity extends FlutterActivity {
                 WidgetSupport.clearCache(getApplicationContext());
                 WidgetSupport.refreshAllFromCache(getApplicationContext());
                 AiConfigStore.clearHistory(getApplicationContext());
+                clearProfileCache();
             } catch (Exception ignored) {
                 // 小组件或对话清理失败不影响退出登录。
             }
@@ -177,6 +183,17 @@ public class MainActivity extends FlutterActivity {
                     runOnUiThread(() -> result.success(text));
                 } catch (Exception error) {
                     runOnUiThread(() -> result.error("CACHE_READ", describe(error), null));
+                }
+            });
+            return;
+        }
+        if ("getCachedProfile".equals(call.method)) {
+            executor.execute(() -> {
+                try {
+                    String text = loadProfileCache().toString();
+                    runOnUiThread(() -> result.success(text));
+                } catch (Exception error) {
+                    runOnUiThread(() -> result.error("PROFILE_CACHE", describe(error), null));
                 }
             });
             return;
@@ -381,6 +398,12 @@ public class MainActivity extends FlutterActivity {
                     break;
                 case "getCardBalance":
                     payload = callSession("get_card_balance");
+                    break;
+                case "getUserProfile":
+                    payload = callSession("get_user_profile");
+                    if (payload.optBoolean("ok")) {
+                        saveProfileCache(payload);
+                    }
                     break;
                 case "getFreeRoomMeta":
                     payload = callSession("get_free_room_meta", number(args, "campus_id"));
@@ -617,6 +640,63 @@ public class MainActivity extends FlutterActivity {
     private static int number(Map<String, Object> values, String key) {
         Object value = values == null ? null : values.get(key);
         return value instanceof Number ? ((Number) value).intValue() : 0;
+    }
+
+    private JSONObject loadProfileCache() {
+        JSONObject empty = new JSONObject();
+        try {
+            empty.put("ok", true);
+            empty.put("cached", false);
+            String[] stored = SessionStore.load(this);
+            if (stored == null) return empty;
+            File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
+            if (!file.isFile()) return empty;
+            try (FileInputStream in = new FileInputStream(file);
+                 ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+                JSONObject cached = new JSONObject(out.toString(StandardCharsets.UTF_8.name()));
+                if (!stored[0].equals(cached.optString("account"))) {
+                    return empty;
+                }
+                cached.put("ok", true);
+                cached.put("cached", true);
+                return cached;
+            }
+        } catch (Exception ignored) {
+            return empty;
+        }
+    }
+
+    private void saveProfileCache(JSONObject payload) {
+        try {
+            String[] stored = SessionStore.load(this);
+            if (stored == null) return;
+            JSONObject cached = new JSONObject();
+            cached.put("account", stored[0]);
+            cached.put("name", payload.optString("name", ""));
+            cached.put("has_portrait", payload.optBoolean("has_portrait", false));
+            cached.put("avatar_base64", payload.optString("avatar_base64", ""));
+            cached.put("avatar_mime", payload.optString("avatar_mime", ""));
+            cached.put("updated_at", System.currentTimeMillis());
+            File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(cached.toString().getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {
+            // 头像缓存写入失败不影响接口返回。
+        }
+    }
+
+    private void clearProfileCache() {
+        File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
+        if (file.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+        }
     }
 
     @Override

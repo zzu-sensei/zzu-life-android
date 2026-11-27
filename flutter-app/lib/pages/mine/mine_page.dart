@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../core/ai_service.dart';
@@ -34,12 +37,75 @@ class MinePage extends StatefulWidget {
 class _MinePageState extends State<MinePage> {
   Map<String, dynamic>? _monitorSettings;
   AiConfig _aiConfig = const AiConfig();
+  Uint8List? _avatarBytes;
+  String _displayName = '';
+  bool _profileLoading = false;
 
   @override
   void initState() {
     super.initState();
     _loadMonitorSummary();
     _loadAiConfig();
+    _loadProfile();
+  }
+
+  void _applyProfilePayload(Map<String, dynamic> payload) {
+    final name = (payload['name'] ?? '').toString().trim();
+    final hasPortrait = payload['has_portrait'] == true;
+    final rawBase64 = (payload['avatar_base64'] ?? '').toString().trim();
+    Uint8List? bytes;
+    if (hasPortrait && rawBase64.isNotEmpty) {
+      try {
+        final decoded = base64Decode(rawBase64);
+        if (decoded.isNotEmpty) {
+          bytes = decoded;
+        }
+      } catch (_) {
+        bytes = null;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      if (name.isNotEmpty) _displayName = name;
+      _avatarBytes = bytes;
+    });
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final cached = await NativeApi.call('getCachedProfile');
+      if (cached['cached'] == true) {
+        _applyProfilePayload(cached);
+      }
+    } catch (_) {}
+    await _refreshProfile(userInitiated: false);
+  }
+
+  Future<void> _refreshProfile({required bool userInitiated}) async {
+    if (_profileLoading) return;
+    if (mounted) setState(() => _profileLoading = true);
+    try {
+      final profile = await NativeApi.call('getUserProfile');
+      _applyProfilePayload(profile);
+      if (userInitiated && mounted) {
+        final hasAvatar = _avatarBytes != null && _avatarBytes!.isNotEmpty;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              hasAvatar ? '已同步教务个人头像' : '教务系统未设置个人头像，已使用默认头像',
+            ),
+          ),
+        );
+      }
+    } catch (caught) {
+      if (userInitiated && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('头像同步失败：$caught')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _profileLoading = false);
+    }
   }
 
   Future<void> _loadAiConfig() async {
@@ -340,24 +406,48 @@ class _MinePageState extends State<MinePage> {
           padding: const EdgeInsets.all(18),
           child: Row(
             children: [
-              Container(
-                width: 54,
-                height: 54,
-                alignment: Alignment.center,
-                decoration: ShapeDecoration(
-                  shape: miuixShape(17),
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF4C95FF), Color(0xFF256BE8)],
-                  ),
-                ),
-                child: const Text(
-                  '郑',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w900,
+              SizedBox(
+                width: 56,
+                height: 56,
+                child: Material(
+                  color: palette.cardSubtle,
+                  shape: miuixShape(18),
+                  clipBehavior: Clip.antiAlias,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (_avatarBytes != null && _avatarBytes!.isNotEmpty)
+                        Image.memory(
+                          _avatarBytes!,
+                          width: 56,
+                          height: 56,
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
+                          errorBuilder: (_, _, _) => Image.asset(
+                            'assets/images/default_avatar.png',
+                            width: 56,
+                            height: 56,
+                            fit: BoxFit.cover,
+                          ),
+                        )
+                      else
+                        Image.asset(
+                          'assets/images/default_avatar.png',
+                          width: 56,
+                          height: 56,
+                          fit: BoxFit.cover,
+                        ),
+                      IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: ShapeDecoration(
+                            shape: miuixShape(
+                              18,
+                              side: BorderSide(color: palette.border, width: 0.8),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -367,7 +457,9 @@ class _MinePageState extends State<MinePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.account,
+                      _displayName.isNotEmpty ? _displayName : widget.account,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: palette.ink,
                         fontSize: 19,
@@ -375,6 +467,17 @@ class _MinePageState extends State<MinePage> {
                         letterSpacing: 0.2,
                       ),
                     ),
+                    if (_displayName.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.account,
+                        style: TextStyle(
+                          color: palette.inkSecondary,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 5),
                     MiuixTag(
                       '本机直连 · 加密会话',
@@ -384,6 +487,19 @@ class _MinePageState extends State<MinePage> {
                     ),
                   ],
                 ),
+              ),
+              IconButton(
+                tooltip: '同步教务个人头像',
+                onPressed: _profileLoading
+                    ? null
+                    : () => _refreshProfile(userInitiated: true),
+                icon: _profileLoading
+                    ? const Loader(size: 16)
+                    : Icon(
+                        Icons.refresh_rounded,
+                        color: palette.inkMuted,
+                        size: 20,
+                      ),
               ),
             ],
           ),

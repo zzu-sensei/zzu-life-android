@@ -942,3 +942,17 @@ def get_free_rooms(
 
     return _with_cas(account, user_token, refresh_token, operation)
 
+
+def get_user_profile(account: str, user_token: str, refresh_token: str) -> str:
+    """获取教务系统首页姓名与个人头像（不回退学籍证件照）。"""
+
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        web = MobileWebEASClient(cas)
+        try:
+            web.login()
+            return web.get_personal_profile()
+        finally:
+            web.close()
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
