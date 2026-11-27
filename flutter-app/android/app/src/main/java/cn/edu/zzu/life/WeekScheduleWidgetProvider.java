@@ -4,6 +4,7 @@ import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProvider;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -20,26 +21,20 @@ import android.widget.RemoteViews;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.Executors;
 
 public class WeekScheduleWidgetProvider extends AppWidgetProvider {
     private static final String REFRESH = "cn.edu.zzu.life.REFRESH_WEEK_SCHEDULE";
-    private static final int[] COURSE_COLORS = {
-        0xFF4F86D9, 0xFF4AA89B, 0xFFE17872, 0xFFD5A344, 0xFF7188C5,
-        0xFFA477BD, 0xFF3D9F78, 0xFFD16F9A, 0xFFCF7845, 0xFF598FB0,
-        0xFF879E4C, 0xFFB66A65, 0xFF6A76C2, 0xFFB98B43, 0xFF497FA2,
-        0xFF8F6FAD, 0xFF3C987F, 0xFFC26285, 0xFF7F8A45, 0xFFB76055
-    };
-    private static final String[] DAYS = {"", "一", "二", "三", "四", "五", "六", "日"};
 
     @Override
     public void onUpdate(Context context, AppWidgetManager manager, int[] ids) {
+        if (ids == null || ids.length == 0) return;
+        String[] stored = SessionStore.load(context);
+        WidgetSupport.CachedData cached = loadEffectiveCache(context);
+        if (stored != null && cached != null) {
+            renderCachedForIds(context, manager, ids, cached, null);
+            return;
+        }
         startUpdate(context, manager, ids, goAsync());
     }
 
@@ -50,7 +45,13 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
         int appWidgetId,
         Bundle newOptions
     ) {
-        startUpdate(context, manager, new int[] {appWidgetId}, goAsync());
+        String[] stored = SessionStore.load(context);
+        WidgetSupport.CachedData cached = loadEffectiveCache(context);
+        if (stored != null && cached != null) {
+            renderCachedForIds(context, manager, new int[] {appWidgetId}, cached, null);
+        } else {
+            startUpdate(context, manager, new int[] {appWidgetId}, goAsync());
+        }
     }
 
     @Override
@@ -58,9 +59,43 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
         super.onReceive(context, intent);
         if (REFRESH.equals(intent.getAction())) {
             AppWidgetManager manager = AppWidgetManager.getInstance(context);
-            int[] ids = manager.getAppWidgetIds(intent.getComponent());
-            startUpdate(context, manager, ids, goAsync());
+            int[] ids = manager.getAppWidgetIds(new ComponentName(context, WeekScheduleWidgetProvider.class));
+            if (ids != null && ids.length > 0) {
+                startUpdate(context, manager, ids, goAsync());
+            }
         }
+    }
+
+    private static WidgetSupport.CachedData loadEffectiveCache(Context context) {
+        WidgetSupport.CachedData sem = WidgetSupport.buildWeekFromSemesterCache(context);
+        WidgetSupport.CachedData direct = WidgetSupport.loadCache(context, WidgetSupport.KEY_WEEK);
+        if (sem != null && direct != null) {
+            boolean directStillCurrentWeek = direct.payload.optInt("week", 0) == sem.payload.optInt("week", -1);
+            if (direct.updatedAt > sem.updatedAt && directStillCurrentWeek) {
+                return direct;
+            }
+            return sem;
+        }
+        return sem != null ? sem : direct;
+    }
+
+    /** 仅从离线缓存重绘整周课表小组件，不发起网络请求（用于主题切换/前台同步/退出登录）。 */
+    static void renderCached(Context context) {
+        AppWidgetManager manager = AppWidgetManager.getInstance(context);
+        int[] ids = manager.getAppWidgetIds(new ComponentName(context, WeekScheduleWidgetProvider.class));
+        if (ids == null || ids.length == 0) return;
+
+        String[] stored = SessionStore.load(context);
+        if (stored == null) {
+            renderStatusForIds(context, manager, ids, "请先打开应用登录", "登录后可在桌面查看整周课程");
+            return;
+        }
+        WidgetSupport.CachedData cached = loadEffectiveCache(context);
+        if (cached == null) {
+            renderStatusForIds(context, manager, ids, "点击右上角刷新同步整周课表", "含实验 · 本机直连");
+            return;
+        }
+        renderCachedForIds(context, manager, ids, cached, null);
     }
 
     private static void startUpdate(
@@ -69,14 +104,14 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
         int[] ids,
         BroadcastReceiver.PendingResult pending
     ) {
-        for (int id : ids) {
-            RemoteViews loading = baseViews(context, id);
-            loading.setViewVisibility(R.id.widget_week_schedule_grid, View.GONE);
-            loading.setViewVisibility(R.id.widget_week_schedule_status, View.VISIBLE);
-            loading.setTextViewText(R.id.widget_week_schedule_status, "正在生成彩色课表…");
-            manager.updateAppWidget(id, loading);
+        WidgetSupport.CachedData existing = loadEffectiveCache(context);
+        if (existing != null) {
+            renderCachedForIds(context, manager, ids, existing, "正在刷新…");
+        } else {
+            renderStatusForIds(context, manager, ids, "正在生成彩色课表…", "正在同步本周课程");
         }
-        Executors.newSingleThreadExecutor().execute(() -> {
+
+        WidgetSupport.runAsync(() -> {
             JSONObject result = null;
             String error = null;
             try {
@@ -88,104 +123,226 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
                 if (!result.optBoolean("ok")) {
                     throw new IllegalStateException(result.optString("error", "课表查询失败"));
                 }
+                WidgetSupport.saveCache(context, WidgetSupport.KEY_WEEK, result);
             } catch (Exception caught) {
-                error = safe(caught.getMessage());
+                error = WidgetSupport.safe(caught.getMessage());
             }
 
-            for (int id : ids) {
-                RemoteViews views = baseViews(context, id);
-                if (result == null) {
-                    views.setViewVisibility(R.id.widget_week_schedule_grid, View.GONE);
-                    views.setViewVisibility(R.id.widget_week_schedule_status, View.VISIBLE);
-                    views.setTextViewText(R.id.widget_week_schedule_status, "刷新失败\n" + error);
-                    views.setTextViewText(
-                        R.id.widget_week_schedule_meta,
-                        "点按刷新或打开应用重新登录"
+            if (result != null) {
+                WidgetSupport.CachedData fresh = new WidgetSupport.CachedData(
+                    result, System.currentTimeMillis(), WidgetSupport.todayIso()
+                );
+                renderCachedForIds(context, manager, ids, fresh, null);
+            } else {
+                boolean loggedOut = SessionStore.load(context) == null;
+                WidgetSupport.CachedData fallback = loggedOut ? null : loadEffectiveCache(context);
+                if (fallback != null) {
+                    renderCachedForIds(
+                        context,
+                        manager,
+                        ids,
+                        fallback,
+                        "刷新失败 · 显示 " + WidgetSupport.formatTime(fallback.updatedAt) + " 缓存"
                     );
                 } else {
-                    Bundle options = manager.getAppWidgetOptions(id);
-                    int widthDp = Math.max(
-                        250,
-                        options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 250)
-                    );
-                    int heightDp = Math.max(
-                        220,
-                        options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 220)
-                    );
-                    int bitmapWidth = Math.min(1400, Math.max(500, widthDp * 2));
-                    int bitmapHeight = Math.min(1800, Math.max(360, (heightDp - 68) * 2));
-                    Bitmap timetable = renderTimetable(
-                        result.optJSONArray("lessons"),
-                        bitmapWidth,
-                        bitmapHeight
-                    );
-                    views.setImageViewBitmap(R.id.widget_week_schedule_grid, timetable);
-                    views.setViewVisibility(R.id.widget_week_schedule_grid, View.VISIBLE);
-                    views.setViewVisibility(R.id.widget_week_schedule_status, View.GONE);
-                    views.setTextViewText(
-                        R.id.widget_week_schedule_meta,
-                        "第 " + result.optInt("week") + " 周 · 含实验 · 点击课程表打开应用"
+                    renderStatusForIds(
+                        context,
+                        manager,
+                        ids,
+                        loggedOut ? "请先打开应用登录" : ("刷新失败\n" + error),
+                        "点按刷新或打开应用重新登录"
                     );
                 }
-                manager.updateAppWidget(id, views);
             }
             if (pending != null) pending.finish();
         });
     }
 
-    private static Bitmap renderTimetable(JSONArray lessons, int width, int height) {
+    private static void renderCachedForIds(
+        Context context,
+        AppWidgetManager manager,
+        int[] ids,
+        WidgetSupport.CachedData cached,
+        String footerOverride
+    ) {
+        WidgetSupport.Palette palette = WidgetSupport.palette(context);
+        JSONObject result = cached.payload;
+        int week = result.optInt("week", 0);
+        JSONArray lessons = result.optJSONArray("lessons");
+        int count = lessons == null ? 0 : lessons.length();
+        String badge = week > 0 ? ("第 " + week + " 周") : "本周课表";
+        boolean fromSemester = result.optBoolean("from_semester_cache", false);
+        String meta = footerOverride != null
+            ? footerOverride
+            : ("本周 " + count + " 节课 · 含实验"
+                + (fromSemester ? " · 离线缓存 " : " · 更新于 ")
+                + WidgetSupport.formatTime(cached.updatedAt));
+
+        for (int id : ids) {
+            RemoteViews views = baseViews(context, id, palette, badge);
+            Bundle options = manager.getAppWidgetOptions(id);
+            int[] size = WidgetSupport.bitmapSize(context, options, 250, 220, 72, 960, 1280);
+            Bitmap timetable = renderWeekTimetable(lessons, size[0], size[1], palette);
+            views.setImageViewBitmap(R.id.widget_week_schedule_grid, timetable);
+            views.setViewVisibility(R.id.widget_week_schedule_grid, View.VISIBLE);
+            views.setViewVisibility(R.id.widget_week_schedule_status, View.GONE);
+            views.setTextViewText(R.id.widget_week_schedule_meta, meta);
+            manager.updateAppWidget(id, views);
+        }
+    }
+
+    private static void renderStatusForIds(
+        Context context,
+        AppWidgetManager manager,
+        int[] ids,
+        String statusText,
+        String metaText
+    ) {
+        WidgetSupport.Palette palette = WidgetSupport.palette(context);
+        for (int id : ids) {
+            RemoteViews views = baseViews(context, id, palette, "本周");
+            views.setViewVisibility(R.id.widget_week_schedule_grid, View.GONE);
+            views.setViewVisibility(R.id.widget_week_schedule_status, View.VISIBLE);
+            views.setTextViewText(R.id.widget_week_schedule_status, statusText);
+            views.setTextViewText(R.id.widget_week_schedule_meta, metaText);
+            manager.updateAppWidget(id, views);
+        }
+    }
+
+    private static Bitmap renderWeekTimetable(
+        JSONArray lessons,
+        int width,
+        int height,
+        WidgetSupport.Palette palette
+    ) {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.TRANSPARENT);
 
-        float headerHeight = Math.max(38f, height * 0.075f);
-        float unitWidth = Math.max(26f, width * 0.048f);
-        float dayWidth = (width - unitWidth) / 7f;
-        float unitHeight = (height - headerHeight) / 10f;
+        int highestEnd = 10;
+        if (lessons != null) {
+            for (int i = 0; i < lessons.length(); i++) {
+                JSONObject lesson = lessons.optJSONObject(i);
+                if (lesson == null) continue;
+                int end = lesson.optInt("end_unit", 10);
+                if (end > highestEnd) highestEnd = end;
+            }
+        }
+        int maxUnit = WidgetSupport.clamp(highestEnd, 10, 14);
+        int todayWeekday = WidgetSupport.clamp(WidgetSupport.todayWeekday(), 1, 7);
 
+        float headerHeight = Math.max(34f, Math.min(48f, height * 0.072f));
+        float unitWidth = Math.max(24f, Math.min(38f, width * 0.048f));
+        float dayWidth = (width - unitWidth) / 7f;
+        float unitHeight = (height - headerHeight) / maxUnit;
+
+        // 今日列淡蓝底色高亮
+        Paint todayColPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        todayColPaint.setColor(palette.todayColBg);
+        float todayLeft = unitWidth + (todayWeekday - 1) * dayWidth;
+        canvas.drawRect(todayLeft, headerHeight, todayLeft + dayWidth, height, todayColPaint);
+
+        // 细网格线
         Paint grid = new Paint(Paint.ANTI_ALIAS_FLAG);
-        grid.setColor(0x385FC5B3);
-        grid.setStrokeWidth(Math.max(1f, width / 700f));
+        grid.setColor(palette.divider);
+        grid.setStrokeWidth(Math.max(1f, width / 760f));
         for (int day = 0; day <= 7; day++) {
             float x = unitWidth + day * dayWidth;
-            canvas.drawLine(x, 0, x, height, grid);
+            canvas.drawLine(x, headerHeight, x, height, grid);
         }
-        for (int unit = 0; unit <= 10; unit++) {
+        for (int unit = 0; unit <= maxUnit; unit++) {
             float y = headerHeight + unit * unitHeight;
-            canvas.drawLine(0, y, width, y, grid);
+            canvas.drawLine(unit == 0 ? 0f : unitWidth, y, width, y, grid);
         }
 
-        Paint header = new Paint(Paint.ANTI_ALIAS_FLAG);
-        header.setColor(0xFFF2FFF9);
-        header.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        header.setTextSize(Math.max(15f, Math.min(24f, dayWidth * 0.34f)));
-        header.setTextAlign(Paint.Align.CENTER);
+        // 星期表头（今天加亮 HyperOS 蓝胶囊）
+        Paint headerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        headerPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        float headerTextSize = Math.max(13f, Math.min(22f, dayWidth * 0.30f));
+        headerPaint.setTextSize(headerTextSize);
+        headerPaint.setTextAlign(Paint.Align.CENTER);
+
+        Paint pillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        pillPaint.setColor(palette.primary);
+
         for (int day = 1; day <= 7; day++) {
-            float x = unitWidth + (day - 0.5f) * dayWidth;
-            drawTextCentered(canvas, "周" + DAYS[day], x, headerHeight / 2f, header);
+            float cx = unitWidth + (day - 0.5f) * dayWidth;
+            float cy = headerHeight * 0.48f;
+            String label = "周" + WidgetSupport.DAYS[day];
+            if (day == todayWeekday) {
+                float pillW = Math.min(dayWidth * 0.84f, headerPaint.measureText(label) + headerTextSize * 1.1f);
+                float pillH = Math.min(headerHeight * 0.80f, headerTextSize * 1.65f);
+                RectF pill = new RectF(cx - pillW / 2f, cy - pillH / 2f, cx + pillW / 2f, cy + pillH / 2f);
+                canvas.drawRoundRect(pill, pillH / 2f, pillH / 2f, pillPaint);
+                headerPaint.setColor(Color.WHITE);
+            } else {
+                headerPaint.setColor(palette.inkSecondary);
+            }
+            WidgetSupport.drawTextCentered(canvas, label, cx, cy, headerPaint);
         }
 
+        // 左侧节次编号
         Paint unitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        unitPaint.setColor(0xFFB8D8CE);
+        unitPaint.setColor(palette.inkMuted);
         unitPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        unitPaint.setTextSize(Math.max(12f, Math.min(20f, unitWidth * 0.48f)));
+        unitPaint.setTextSize(Math.max(11f, Math.min(18f, Math.min(unitWidth * 0.48f, unitHeight * 0.55f))));
         unitPaint.setTextAlign(Paint.Align.CENTER);
-        for (int unit = 1; unit <= 10; unit++) {
+        for (int unit = 1; unit <= maxUnit; unit++) {
             float y = headerHeight + (unit - 0.5f) * unitHeight;
-            drawTextCentered(canvas, String.valueOf(unit), unitWidth / 2f, y, unitPaint);
+            WidgetSupport.drawTextCentered(canvas, String.valueOf(unit), unitWidth / 2f, y, unitPaint);
         }
 
-        Map<String, Integer> colors = colorsForLessons(lessons);
-        if (lessons == null) return bitmap;
+        if (lessons == null || lessons.length() == 0) {
+            Paint emptyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            emptyPaint.setColor(palette.inkMuted);
+            emptyPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            emptyPaint.setTextSize(Math.max(16f, Math.min(24f, width * 0.036f)));
+            emptyPaint.setTextAlign(Paint.Align.CENTER);
+            WidgetSupport.drawTextCentered(
+                canvas,
+                "本周暂无排课",
+                unitWidth + (width - unitWidth) / 2f,
+                headerHeight + (height - headerHeight) / 2f,
+                emptyPaint
+            );
+            return bitmap;
+        }
+
+        Map<String, WidgetSupport.CourseStyle> styles = WidgetSupport.assignCourseStyles(lessons, palette.dark);
+        Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        borderPaint.setStyle(Paint.Style.STROKE);
+        borderPaint.setStrokeWidth(Math.max(1f, width / 760f));
+        Paint accentPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        Paint coursePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        coursePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        Paint placePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint labPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        labPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        labPaint.setTextAlign(Paint.Align.RIGHT);
+
+        float gap = Math.max(1.8f, width / 460f);
+        float radius = Math.max(6f, Math.min(11f, dayWidth * 0.14f));
+        float barW = Math.max(3f, Math.min(5f, dayWidth * 0.055f));
+        float padding = Math.max(3f, width / 260f);
+
         for (int index = 0; index < lessons.length(); index++) {
             JSONObject lesson = lessons.optJSONObject(index);
             if (lesson == null) continue;
-            int weekday = clamp(lesson.optInt("weekday", 1), 1, 7);
-            int start = clamp(lesson.optInt("start_unit", 1), 1, 10);
-            int end = clamp(lesson.optInt("end_unit", start), start, 10);
+            int weekday = WidgetSupport.clamp(lesson.optInt("weekday", 1), 1, 7);
+            int start = WidgetSupport.clamp(lesson.optInt("start_unit", 1), 1, maxUnit);
+            int end = WidgetSupport.clamp(lesson.optInt("end_unit", start), start, maxUnit);
             String course = lesson.optString("course", "未知课程");
             String place = lesson.optString("place", "地点未定");
-            float gap = Math.max(2f, width / 420f);
+
+            WidgetSupport.CourseStyle style = styles.get(course);
+            if (style == null) {
+                style = new WidgetSupport.CourseStyle(
+                    palette.cardFill, palette.cardBorder, palette.primary, palette.ink, palette.inkSecondary
+                );
+            }
+
             RectF block = new RectF(
                 unitWidth + (weekday - 1) * dayWidth + gap,
                 headerHeight + (start - 1) * unitHeight + gap,
@@ -193,52 +350,62 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
                 headerHeight + end * unitHeight - gap
             );
 
-            Paint blockPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            blockPaint.setColor(colors.get(course));
-            canvas.drawRoundRect(block, gap * 2.4f, gap * 2.4f, blockPaint);
+            fillPaint.setColor(style.background);
+            canvas.drawRoundRect(block, radius, radius, fillPaint);
+
+            borderPaint.setColor(style.border);
+            canvas.drawRoundRect(block, radius, radius, borderPaint);
 
             canvas.save();
             Path clip = new Path();
-            clip.addRoundRect(block, gap * 2.4f, gap * 2.4f, Path.Direction.CW);
+            clip.addRoundRect(block, radius, radius, Path.Direction.CW);
             canvas.clipPath(clip);
-            float padding = Math.max(3f, width / 250f);
-            Paint coursePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            coursePaint.setColor(Color.WHITE);
-            coursePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            coursePaint.setTextSize(Math.max(11f, Math.min(18f, dayWidth * 0.25f)));
-            float y = block.top + padding + coursePaint.getTextSize();
+
+            // 左侧强调竖条
+            accentPaint.setColor(style.accent);
+            canvas.drawRect(block.left, block.top, block.left + barW, block.bottom, accentPaint);
+
+            float textLeft = block.left + barW + padding;
+            float textMaxW = Math.max(12f, block.right - padding - textLeft);
+
+            float courseSize = Math.max(10f, Math.min(17f, dayWidth * 0.23f));
+            coursePaint.setTextSize(courseSize);
+            coursePaint.setColor(style.title);
+
+            float placeSize = Math.max(8.5f, Math.min(13.5f, dayWidth * 0.18f));
+            placePaint.setTextSize(placeSize);
+            placePaint.setColor(style.subtitle);
+
+            boolean showLab = lesson.optBoolean("is_experiment") && block.height() > placeSize * 3.4f;
+            float contentBottom = block.bottom - padding - (showLab ? (placeSize * 1.15f) : 0f);
+
             int courseLines = end > start ? 3 : 2;
-            y = drawWrappedText(
+            float y = block.top + padding + courseSize;
+            y = WidgetSupport.drawWrappedText(
                 canvas,
                 course,
-                block.left + padding,
+                textLeft,
                 y,
-                block.width() - padding * 2,
+                textMaxW,
                 courseLines,
                 coursePaint,
-                block.bottom - padding
+                contentBottom
             );
 
-            Paint placePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            placePaint.setColor(0xF0FFFFFF);
-            placePaint.setTextSize(Math.max(9f, Math.min(15f, dayWidth * 0.20f)));
-            drawWrappedText(
+            WidgetSupport.drawWrappedText(
                 canvas,
                 place,
-                block.left + padding,
-                y + padding,
-                block.width() - padding * 2,
-                end > start ? 3 : 1,
+                textLeft,
+                y + padding * 0.45f,
+                textMaxW,
+                end > start ? 2 : 1,
                 placePaint,
-                block.bottom - padding
+                contentBottom
             );
 
-            if (lesson.optBoolean("is_experiment") && block.height() > placePaint.getTextSize() * 3) {
-                Paint labPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                labPaint.setColor(Color.WHITE);
-                labPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-                labPaint.setTextSize(placePaint.getTextSize());
-                labPaint.setTextAlign(Paint.Align.RIGHT);
+            if (showLab) {
+                labPaint.setColor(style.accent);
+                labPaint.setTextSize(placeSize);
                 canvas.drawText("实验", block.right - padding, block.bottom - padding, labPaint);
             }
             canvas.restore();
@@ -246,92 +413,23 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
         return bitmap;
     }
 
-    private static Map<String, Integer> colorsForLessons(JSONArray lessons) {
-        Map<String, Integer> result = new HashMap<>();
-        Set<Integer> used = new HashSet<>();
-        if (lessons == null) return result;
-        for (int index = 0; index < lessons.length(); index++) {
-            JSONObject lesson = lessons.optJSONObject(index);
-            if (lesson == null) continue;
-            String course = lesson.optString("course", "未知课程");
-            if (result.containsKey(course)) continue;
-            int colorIndex = courseIndex(course);
-            while (used.contains(colorIndex) && used.size() < COURSE_COLORS.length) {
-                colorIndex = (colorIndex + 1) % COURSE_COLORS.length;
-            }
-            used.add(colorIndex);
-            result.put(course, COURSE_COLORS[colorIndex]);
-        }
-        return result;
-    }
-
-    private static float drawWrappedText(
-        Canvas canvas,
-        String text,
-        float x,
-        float firstBaseline,
-        float maxWidth,
-        int maxLines,
-        Paint paint,
-        float bottom
+    private static RemoteViews baseViews(
+        Context context,
+        int id,
+        WidgetSupport.Palette palette,
+        String badgeText
     ) {
-        List<String> lines = wrap(text, paint, maxWidth, maxLines);
-        float lineHeight = paint.getTextSize() * 1.12f;
-        float y = firstBaseline;
-        for (String line : lines) {
-            if (y > bottom) break;
-            canvas.drawText(line, x, y, paint);
-            y += lineHeight;
-        }
-        return y;
-    }
-
-    private static List<String> wrap(String text, Paint paint, float maxWidth, int maxLines) {
-        List<String> lines = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        int consumed = 0;
-        for (int index = 0; index < text.length(); index++) {
-            char character = text.charAt(index);
-            String candidate = current.toString() + character;
-            if (current.length() > 0 && paint.measureText(candidate) > maxWidth) {
-                lines.add(current.toString());
-                current.setLength(0);
-                if (lines.size() == maxLines) break;
-            }
-            current.append(character);
-            consumed = index + 1;
-        }
-        if (lines.size() < maxLines && current.length() > 0) lines.add(current.toString());
-        if (consumed < text.length() && !lines.isEmpty()) {
-            int last = lines.size() - 1;
-            String value = lines.get(last);
-            while (!value.isEmpty() && paint.measureText(value + "…") > maxWidth) {
-                value = value.substring(0, value.length() - 1);
-            }
-            lines.set(last, value + "…");
-        }
-        return lines;
-    }
-
-    private static void drawTextCentered(Canvas canvas, String text, float x, float y, Paint paint) {
-        Paint.FontMetrics metrics = paint.getFontMetrics();
-        canvas.drawText(text, x, y - (metrics.ascent + metrics.descent) / 2f, paint);
-    }
-
-    private static int courseIndex(String course) {
-        int hash = 0x811C9DC5;
-        for (int index = 0; index < course.length(); index++) {
-            hash = (hash ^ course.charAt(index)) * 0x01000193;
-        }
-        return (hash & 0x7FFFFFFF) % COURSE_COLORS.length;
-    }
-
-    private static int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private static RemoteViews baseViews(Context context, int id) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_week_schedule);
+        views.setInt(R.id.widget_week_schedule_root, "setBackgroundResource", palette.bgRes);
+        views.setTextColor(R.id.widget_week_schedule_title, palette.ink);
+        views.setInt(R.id.widget_week_schedule_badge, "setBackgroundResource", palette.badgeBlueRes);
+        views.setTextColor(R.id.widget_week_schedule_badge, palette.primary);
+        views.setTextViewText(R.id.widget_week_schedule_badge, badgeText);
+        views.setInt(R.id.widget_week_schedule_refresh, "setBackgroundResource", palette.pillRes);
+        views.setTextColor(R.id.widget_week_schedule_refresh, palette.primary);
+        views.setTextColor(R.id.widget_week_schedule_status, palette.inkSecondary);
+        views.setTextColor(R.id.widget_week_schedule_meta, palette.inkMuted);
+
         Intent refresh = new Intent(context, WeekScheduleWidgetProvider.class).setAction(REFRESH);
         views.setOnClickPendingIntent(
             R.id.widget_week_schedule_refresh,
@@ -353,9 +451,5 @@ public class WeekScheduleWidgetProvider extends AppWidgetProvider {
             )
         );
         return views;
-    }
-
-    private static String safe(String value) {
-        return value == null || value.isEmpty() ? "未知错误" : value;
     }
 }

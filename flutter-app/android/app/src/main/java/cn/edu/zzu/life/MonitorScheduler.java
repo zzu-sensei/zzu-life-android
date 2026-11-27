@@ -214,6 +214,14 @@ final class MonitorScheduler {
             // 采样失败不影响提醒逻辑。
         }
 
+        // 顺带刷新桌面电量小组件离线缓存与视图。
+        try {
+            WidgetSupport.saveCache(context, WidgetSupport.KEY_ENERGY, payload);
+            EnergyWidgetProvider.renderCached(context);
+        } catch (Exception ignored) {
+            // 小组件更新失败不影响后台巡检。
+        }
+
         sendEnergyEmailIfNeeded(context, meters, room, output);
     }
 

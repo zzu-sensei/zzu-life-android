@@ -3,12 +3,13 @@ import 'package:flutter/services.dart';
 
 import '../../core/native_api.dart';
 import '../../theme/app_theme.dart';
+import 'ai/ai_page.dart';
 import 'energy/energy_page.dart';
 import 'mine/mine_page.dart';
 import 'schedule/schedule_page.dart';
 import 'study/study_hub_page.dart';
 
-/// 主界面导航壳：底部 4 标签栏（课表 / 学习 / 电费 / 我的），页面按需懒加载。
+/// 主界面导航壳：底部 5 标签栏（课表 / 学习 / 电费 / AI / 我的），页面按需懒加载。
 class HomeShell extends StatefulWidget {
   const HomeShell({
     super.key,
@@ -26,6 +27,7 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  final GlobalKey<AiPageState> _aiPageKey = GlobalKey<AiPageState>();
   int _index = 0;
   final Set<int> _mountedTabs = {0};
   Map<String, dynamic>? _updateInfo;
@@ -83,6 +85,9 @@ class _HomeShellState extends State<HomeShell> {
                 ? const EnergyPage()
                 : const SizedBox.shrink(),
             _mountedTabs.contains(3)
+                ? AiPage(key: _aiPageKey)
+                : const SizedBox.shrink(),
+            _mountedTabs.contains(4)
                 ? MinePage(
                     account: widget.account,
                     themeController: widget.themeController,
@@ -91,6 +96,7 @@ class _HomeShellState extends State<HomeShell> {
                     onUpdateInfoChanged: (info) {
                       if (mounted) setState(() => _updateInfo = info);
                     },
+                    onAiConfigChanged: () => _aiPageKey.currentState?.reloadConfig(),
                   )
                 : const SizedBox.shrink(),
           ],
@@ -118,6 +124,11 @@ class _HomeShellState extends State<HomeShell> {
               icon: Icon(Icons.bolt_outlined),
               selectedIcon: Icon(Icons.bolt_rounded),
               label: '电费',
+            ),
+            const NavigationDestination(
+              icon: Icon(Icons.auto_awesome_outlined),
+              selectedIcon: Icon(Icons.auto_awesome_rounded),
+              label: 'AI',
             ),
             NavigationDestination(
               icon: Badge(

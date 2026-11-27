@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_widgets"
+        android:shortcutId="pin_widgets"
+        android:shortcutLongLabel="@string/shortcut_widgets_long"
+        android:shortcutShortLabel="@string/shortcut_widgets_short">
+        <intent
+            android:action="cn.edu.zzu.life.ACTION_PIN_WIDGETS"
+            android:targetClass="cn.edu.zzu.life.WidgetPinActivity"
+            android:targetPackage="cn.edu.zzu.life" />
+    </shortcut>
+</shortcuts>

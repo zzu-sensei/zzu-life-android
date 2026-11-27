@@ -18,11 +18,17 @@ class SchedulePage extends StatefulWidget {
 
 class _SchedulePageState extends State<SchedulePage> {
   static const int _minWeek = 1;
-  static const int _maxWeek = 30;
+  static const int _defaultMaxWeek = 30;
 
   int week = 0;
   int currentWeek = 0;
+  int maxWeek = _defaultMaxWeek;
   bool loading = true;
+  bool caching = false;
+  bool hasOfflineCache = false;
+  int cacheUpdatedAt = 0;
+  String cacheSemesterName = '';
+  int cacheTotalLessons = 0;
   bool showExperiments = true;
   bool exporting = false;
   bool isDayView = false;
@@ -36,11 +42,196 @@ class _SchedulePageState extends State<SchedulePage> {
   @override
   void initState() {
     super.initState();
-    load();
+    _initSchedule();
+  }
+
+  Future<void> _initSchedule() async {
+    try {
+      final cached = await NativeApi.call('getCachedSchedule');
+      if (!mounted) return;
+      if (cached['cached'] == true && cached['data'] is Map) {
+        final data = Map<String, dynamic>.from(cached['data'] as Map);
+        setState(() {
+          _applySemesterCache(data);
+          loading = false;
+        });
+        return;
+      }
+    } catch (_) {}
+    await load();
+  }
+
+  void _applySemesterCache(
+    Map<String, dynamic> data, {
+    bool keepSelectedWeek = false,
+  }) {
+    final resolvedMax = ((data['max_week'] as num?)?.toInt() ?? 20).clamp(
+      _minWeek,
+      _defaultMaxWeek,
+    );
+    final rawWeeks = (data['weeks'] as Map?) ?? const {};
+    _weekCache.clear();
+    for (var w = _minWeek; w <= resolvedMax; w++) {
+      final list = rawWeeks['$w'];
+      _weekCache[w] = list is List
+          ? list.whereType<Map>().toList()
+          : const <Map>[];
+    }
+
+    var computedCurrent = (data['current_week'] as num?)?.toInt() ?? 1;
+    final startStr = (data['start_date'] ?? '').toString().trim();
+    if (startStr.length >= 10) {
+      final parsedStart = DateTime.tryParse(startStr.substring(0, 10));
+      if (parsedStart != null) {
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final startDay = DateTime(
+          parsedStart.year,
+          parsedStart.month,
+          parsedStart.day,
+        );
+        computedCurrent = today.difference(startDay).inDays ~/ 7 + 1;
+      }
+    }
+    computedCurrent = computedCurrent.clamp(_minWeek, resolvedMax);
+    final targetWeek = (keepSelectedWeek && week >= _minWeek)
+        ? week.clamp(_minWeek, resolvedMax)
+        : computedCurrent;
+
+    maxWeek = resolvedMax;
+    currentWeek = computedCurrent;
+    week = targetWeek;
+    lessons = _weekCache[targetWeek] ?? const [];
+    hasOfflineCache = true;
+    cacheUpdatedAt = (data['cached_at'] as num?)?.toInt() ?? 0;
+    cacheSemesterName = (data['semester_name'] ?? '').toString();
+    cacheTotalLessons = (data['total_lessons'] as num?)?.toInt() ?? 0;
+    error = null;
+  }
+
+  Future<void> _cacheSemesterSchedule() async {
+    if (caching) return;
+    HapticFeedback.lightImpact();
+    setState(() => caching = true);
+    try {
+      final result = await NativeApi.call('cacheSemesterSchedule');
+      if (!mounted) return;
+      setState(() {
+        _applySemesterCache(result, keepSelectedWeek: week > 0);
+        loading = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '整学期课表已离线缓存（共 $maxWeek 周 · $cacheTotalLessons 节），桌面小组件已同步',
+          ),
+        ),
+      );
+    } catch (caught) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('缓存失败：$caught')),
+        );
+      }
+    }
+    if (mounted) setState(() => caching = false);
+  }
+
+  Future<void> _openCacheSheet() async {
+    await showMiuixSheet<void>(
+      context,
+      builder: (sheetContext) {
+        final palette = sheetContext.palette;
+        final cachedTimeText = formatTimestamp(cacheUpdatedAt);
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MiuixSheetHeader(
+              title: '离线课表缓存',
+              subtitle: cacheSemesterName.isNotEmpty
+                  ? '$cacheSemesterName · 已缓存整学期'
+                  : '已缓存整学期课表，翻周与小组件免联网',
+            ),
+            const SizedBox(height: 14),
+            MiuixCard(
+              color: palette.cardSubtle,
+              showShadow: false,
+              radius: 16,
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                children: [
+                  ConfirmRow('教学周范围', '第 1 – $maxWeek 周'),
+                  ConfirmRow('课表条数', '共 $cacheTotalLessons 节次'),
+                  if (cachedTimeText.isNotEmpty)
+                    ConfirmRow('缓存时间', cachedTimeText),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '开启后应用内翻周和「今日课表 / 整周课表」小组件都会优先读取本地缓存；如需拉取最新调课，点击右上角刷新或下方更新缓存即可。',
+              style: TextStyle(
+                color: palette.inkSecondary,
+                fontSize: 12,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: palette.danger,
+                      side: BorderSide(
+                        color: palette.danger.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    onPressed: () async {
+                      Navigator.pop(sheetContext);
+                      try {
+                        await NativeApi.call('clearCachedSchedule');
+                      } catch (_) {}
+                      if (!mounted) return;
+                      setState(() {
+                        hasOfflineCache = false;
+                        cacheUpdatedAt = 0;
+                        cacheSemesterName = '';
+                        cacheTotalLessons = 0;
+                        maxWeek = _defaultMaxWeek;
+                        _weekCache.clear();
+                      });
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已清除整学期离线缓存')),
+                      );
+                      await load(week > 0 ? week : null, true);
+                    },
+                    child: const Text('清除缓存'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _cacheSemesterSchedule();
+                    },
+                    icon: const Icon(Icons.sync_rounded, size: 18),
+                    label: const Text('更新整学期缓存'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> load([int? target, bool force = false]) async {
-    final normalizedTarget = target?.clamp(_minWeek, _maxWeek);
+    final normalizedTarget = target?.clamp(_minWeek, maxWeek);
     if (normalizedTarget != null &&
         !force &&
         _weekCache.containsKey(normalizedTarget)) {
@@ -68,7 +259,7 @@ class _SchedulePageState extends State<SchedulePage> {
       if (!mounted) return;
       final fetchedWeek = ((result['week'] as num?)?.toInt() ?? 1).clamp(
         _minWeek,
-        _maxWeek,
+        maxWeek,
       );
       final fetchedLessons = ((result['lessons'] as List?) ?? const [])
           .cast<Map>();
@@ -114,7 +305,7 @@ class _SchedulePageState extends State<SchedulePage> {
                 crossAxisSpacing: 8,
                 childAspectRatio: 1.45,
               ),
-              itemCount: _maxWeek,
+              itemCount: maxWeek,
               itemBuilder: (context, index) {
                 final value = index + 1;
                 final isSelected = value == week;
@@ -521,7 +712,7 @@ class _SchedulePageState extends State<SchedulePage> {
                 ),
                 IconButton(
                   tooltip: '下一周',
-                  onPressed: loading || week >= _maxWeek
+                  onPressed: loading || week >= maxWeek
                       ? null
                       : () => load(week + 1),
                   icon: const Icon(Icons.chevron_right_rounded),
@@ -550,7 +741,7 @@ class _SchedulePageState extends State<SchedulePage> {
           child: Row(
             children: [
               SizedBox(
-                width: 112,
+                width: 96,
                 child: MiuixSegmentedControl<bool>(
                   height: 34,
                   value: isDayView,
@@ -561,26 +752,66 @@ class _SchedulePageState extends State<SchedulePage> {
                   onChanged: (value) => setState(() => isDayView = value),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               FilterChip(
                 selected: showExperiments,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 onSelected: (value) => setState(() => showExperiments = value),
                 avatar: Icon(
                   Icons.science_outlined,
-                  size: 16,
+                  size: 15,
                   color: showExperiments
                       ? palette.onPrimarySoft
                       : palette.inkSecondary,
                 ),
-                label: const Text('含实验'),
+                label: const Text('含实验', style: TextStyle(fontSize: 12.5)),
               ),
               const Spacer(),
               TextButton.icon(
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  minimumSize: const Size(0, 34),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  foregroundColor: hasOfflineCache
+                      ? palette.success
+                      : palette.primary,
+                ),
+                onPressed: caching
+                    ? null
+                    : (hasOfflineCache
+                          ? _openCacheSheet
+                          : _cacheSemesterSchedule),
+                icon: caching
+                    ? const Loader(size: 14)
+                    : Icon(
+                        hasOfflineCache
+                            ? Icons.offline_pin_rounded
+                            : Icons.cloud_download_outlined,
+                        size: 16,
+                      ),
+                label: Text(
+                  hasOfflineCache ? '已缓存' : '缓存课表',
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: '导出 ICS 日历',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints.tightFor(
+                  width: 34,
+                  height: 34,
+                ),
                 onPressed: loading || exporting ? null : exportAllSchedule,
                 icon: exporting
-                    ? const Loader(size: 14)
-                    : const Icon(Icons.download_rounded, size: 17),
-                label: const Text('导出 ICS'),
+                    ? const Loader(size: 15)
+                    : const Icon(Icons.download_rounded, size: 18),
               ),
             ],
           ),
@@ -610,7 +841,7 @@ class _SchedulePageState extends State<SchedulePage> {
                   onHorizontalDragEnd: (details) {
                     final velocity = details.primaryVelocity ?? 0;
                     if (velocity.abs() < 260) return;
-                    if (velocity < 0 && week < _maxWeek) {
+                    if (velocity < 0 && week < maxWeek) {
                       load(week + 1);
                     } else if (velocity > 0 && week > _minWeek) {
                       load(week - 1);

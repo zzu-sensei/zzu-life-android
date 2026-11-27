@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 import mobile_exam_page
 import mobile_network_page
 import mobile_plan_page
+import mobile_room_page
 
 
 def _message(data: dict, fallback: str) -> str:
@@ -448,6 +449,11 @@ class MobileWebEASClient:
     )
     #: 考试信息页。列表数据由 ``.../info/{studentId}?semesterId=`` 返回。
     EXAM_ARRANGE = "https://jwxt.zzu.edu.cn/student/for-std/exam-arrange"
+    #: 空闲教室查询页及 XHR 接口。
+    ROOM_FREE = "https://jwxt.zzu.edu.cn/student/for-std/room-free"
+    ROOM_BUILDINGS = "https://jwxt.zzu.edu.cn/student/ws/room/get-buildings"
+    ROOM_UNITS = "https://jwxt.zzu.edu.cn/student/ws/room-borrow/get-unit-campus"
+    ROOM_FREE_LIST = "https://jwxt.zzu.edu.cn/student/ws/room-borrow/free-list"
     USER_AGENT = (
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
         "Chrome/131.0 Mobile Safari/537.36"
@@ -589,6 +595,80 @@ class MobileWebEASClient:
         if self._looks_like_login(response):
             raise RuntimeError("教务网页会话已失效，请重新登录。")
         return mobile_exam_page.parse_exams(response.text)
+
+    def get_room_free_meta(self, campus_id: int | None = None) -> dict:
+        """获取空闲教室查询页面元数据及所选校区的教学楼与节次。"""
+        response = self.client.get(self.ROOM_FREE, headers=self.headers)
+        response.raise_for_status()
+        if self._looks_like_login(response):
+            raise RuntimeError("教务网页会话已失效，请重新登录。")
+        meta = mobile_room_page.parse_room_free_meta(response.text)
+        campuses = meta.get("campuses") or []
+        valid_ids = {item["id"] for item in campuses}
+        selected_campus = (
+            campus_id
+            if campus_id and campus_id in valid_ids
+            else (campuses[0]["id"] if campuses else 2)
+        )
+        meta["selected_campus_id"] = selected_campus
+
+        b_resp = self.client.get(
+            self.ROOM_BUILDINGS,
+            headers=self.headers,
+            params={"campusId": selected_campus, "hasDataPermission": "false"},
+        )
+        b_resp.raise_for_status()
+        meta["buildings"] = mobile_room_page.normalize_buildings(b_resp.json())
+
+        u_resp = self.client.get(
+            self.ROOM_UNITS,
+            headers=self.headers,
+            params={"campusId": selected_campus},
+        )
+        u_resp.raise_for_status()
+        campus_units = mobile_room_page.normalize_units(u_resp.json())
+        if campus_units:
+            meta["units"] = campus_units
+        return meta
+
+    def query_free_rooms(
+        self,
+        campus_id: int,
+        date_str: str,
+        units: list[int],
+        building_id: str = "",
+        room_type: int | None = None,
+        min_seats: int | None = None,
+    ) -> list[dict]:
+        """按校区、教学楼、日期、节次与教室类型查询空闲教室。"""
+        body: dict = {
+            "buildingId": str(building_id or ""),
+            "campusId": str(campus_id),
+            "roomId": "",
+            "dateTimeSegmentCmd": {
+                "startDateTime": date_str,
+                "endDateTime": date_str,
+                "startTime": "",
+                "endTime": "",
+                "weekdays": [],
+                "units": units,
+            },
+            "seatsForLessonGte": "" if not min_seats or min_seats <= 0 else str(min_seats),
+            "hasDataPermission": False,
+        }
+        if room_type and room_type > 0:
+            body["roomType"] = int(room_type)
+
+        response = self.client.post(
+            self.ROOM_FREE_LIST,
+            headers={**self.headers, "X-Requested-With": "XMLHttpRequest"},
+            json=body,
+        )
+        response.raise_for_status()
+        if self._looks_like_login(response):
+            raise RuntimeError("教务网页会话已失效，请重新登录。")
+        payload = response.json() or {}
+        return mobile_room_page.normalize_free_rooms(payload.get("roomList") or [])
 
     def get_transcript(self) -> tuple[bytes, str]:
         response = self._get(
@@ -932,6 +1012,27 @@ def get_meter_energy(ecard: MobileECardClient, default_room: str, meter_type: st
         raise RuntimeError(f"匹配到多个{meter_type}候选，无法安全确定。")
     meter_id = candidates[0][0]
     return meter_id, ecard.get_remaining_energy(meter_id)
+
+
+PORTAL_CARDS = (
+    "https://info.s.zzu.edu.cn/portal-api/v1/thrid-adapter/get-person-info-card-list"
+)
+
+
+def get_portal_card_balance(cas: MobileCASClient) -> dict:
+    """从门户信息卡读取一卡通余额（仅使用 CAS userToken）。"""
+    if not cas.user_token:
+        raise RuntimeError("登录已失效，请重新登录。")
+    client = HttpClient(timeout=15)
+    try:
+        response = client.get(
+            PORTAL_CARDS,
+            headers={"X-Id-Token": cas.user_token},
+        )
+        response.raise_for_status()
+        return mobile_room_page.parse_portal_cards(response.json())
+    finally:
+        client.close()
 
 
 def discover_meter_energy(ecard: MobileECardClient, default_room: str) -> list[dict]:

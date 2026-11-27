@@ -2,11 +2,16 @@ package cn.edu.zzu.life;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.appwidget.AppWidgetManager;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.print.PrintManager;
+import android.provider.Settings;
 import android.util.Base64;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -69,6 +74,13 @@ public class MainActivity extends FlutterActivity {
         }
         if ("logout".equals(call.method)) {
             SessionStore.clear(this);
+            try {
+                WidgetSupport.clearCache(getApplicationContext());
+                WidgetSupport.refreshAllFromCache(getApplicationContext());
+                AiConfigStore.clearHistory(getApplicationContext());
+            } catch (Exception ignored) {
+                // 小组件或对话清理失败不影响退出登录。
+            }
             result.success("{\"ok\":true}");
             return;
         }
@@ -143,6 +155,100 @@ public class MainActivity extends FlutterActivity {
         }
         if ("saveThemeMode".equals(call.method)) {
             MonitorSettings.saveThemeMode(this, call.argument("mode"));
+            try {
+                WidgetSupport.refreshAllFromCache(getApplicationContext());
+            } catch (Exception ignored) {
+                // 小组件重绘失败不影响主题切换。
+            }
+            result.success("{\"ok\":true}");
+            return;
+        }
+        if ("getCachedSchedule".equals(call.method)) {
+            executor.execute(() -> {
+                try {
+                    JSONObject data = WidgetSupport.loadSemesterSchedule(getApplicationContext());
+                    JSONObject payload = new JSONObject();
+                    payload.put("ok", true);
+                    payload.put("cached", data != null);
+                    if (data != null) {
+                        payload.put("data", data);
+                    }
+                    String text = payload.toString();
+                    runOnUiThread(() -> result.success(text));
+                } catch (Exception error) {
+                    runOnUiThread(() -> result.error("CACHE_READ", describe(error), null));
+                }
+            });
+            return;
+        }
+        if ("clearCachedSchedule".equals(call.method)) {
+            WidgetSupport.clearSemesterSchedule(getApplicationContext());
+            try {
+                ScheduleWidgetProvider.renderCached(getApplicationContext());
+                WeekScheduleWidgetProvider.renderCached(getApplicationContext());
+            } catch (Exception ignored) {
+                // 清理后的小组件重绘失败不影响缓存清除。
+            }
+            result.success("{\"ok\":true}");
+            return;
+        }
+        if ("pinWidget".equals(call.method)) {
+            handlePinWidget(call.argument("type"), result);
+            return;
+        }
+        if ("openAppSettings".equals(call.method)) {
+            Intent intent = new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", getPackageName(), null)
+            );
+            startActivity(intent);
+            result.success("{\"ok\":true}");
+            return;
+        }
+        if ("getAiConfig".equals(call.method)) {
+            try {
+                result.success(AiConfigStore.loadConfig(getApplicationContext()).toString());
+            } catch (Exception error) {
+                result.error("AI_CONFIG", describe(error), null);
+            }
+            return;
+        }
+        if ("saveAiConfig".equals(call.method)) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> values = (Map<String, Object>) call.arguments;
+                AiConfigStore.saveConfig(getApplicationContext(), values);
+                result.success(AiConfigStore.loadConfig(getApplicationContext()).toString());
+            } catch (Exception error) {
+                result.error("AI_CONFIG_SAVE", describe(error), null);
+            }
+            return;
+        }
+        if ("getAiHistory".equals(call.method)) {
+            executor.execute(() -> {
+                try {
+                    String payload = AiConfigStore.loadHistory(getApplicationContext()).toString();
+                    runOnUiThread(() -> result.success(payload));
+                } catch (Exception error) {
+                    runOnUiThread(() -> result.error("AI_HISTORY", describe(error), null));
+                }
+            });
+            return;
+        }
+        if ("saveAiHistory".equals(call.method)) {
+            String messagesJson = call.argument("messages");
+            executor.execute(() -> {
+                try {
+                    AiConfigStore.saveHistory(getApplicationContext(), messagesJson);
+                    runOnUiThread(() -> result.success("{\"ok\":true}"));
+                } catch (Exception error) {
+                    runOnUiThread(() -> result.error("AI_HISTORY_SAVE", describe(error), null));
+                }
+            });
+            return;
+        }
+        if ("clearAiHistory".equals(call.method)) {
+            AiConfigStore.clearHistory(getApplicationContext());
             result.success("{\"ok\":true}");
             return;
         }
@@ -160,6 +266,42 @@ public class MainActivity extends FlutterActivity {
             return;
         }
         executor.execute(() -> executePython(call, result));
+    }
+
+    private void handlePinWidget(String type, MethodChannel.Result result) {
+        Class<?> providerClass;
+        if ("week".equals(type)) {
+            providerClass = WeekScheduleWidgetProvider.class;
+        } else if ("energy".equals(type)) {
+            providerClass = EnergyWidgetProvider.class;
+        } else {
+            providerClass = ScheduleWidgetProvider.class;
+        }
+        try {
+            AppWidgetManager manager = AppWidgetManager.getInstance(this);
+            boolean supported = manager != null && manager.isRequestPinAppWidgetSupported();
+            boolean requested = false;
+            if (supported) {
+                PendingIntent callback = PendingIntent.getBroadcast(
+                    this,
+                    providerClass.hashCode() & 0x7FFF,
+                    new Intent(this, providerClass).setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                );
+                requested = manager.requestPinAppWidget(
+                    new ComponentName(this, providerClass),
+                    null,
+                    callback
+                );
+            }
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("supported", supported);
+            payload.put("requested", requested);
+            result.success(payload.toString());
+        } catch (Exception error) {
+            result.error("PIN_WIDGET", describe(error), null);
+        }
     }
 
     /** 把异常整理成能直接展示给用户的一句话。 */
@@ -207,10 +349,52 @@ public class MainActivity extends FlutterActivity {
                     payload = callSession(
                         "get_schedule", number(args, "week"), number(args, "semester_id")
                     );
+                    if (payload.optBoolean("ok")
+                            && number(args, "week") == 0
+                            && number(args, "semester_id") == 0) {
+                        try {
+                            WidgetSupport.saveScheduleFromApp(getApplicationContext(), payload);
+                        } catch (Exception ignored) {
+                            // 小组件同步失败不影响前台课表展示。
+                        }
+                    }
+                    break;
+                case "cacheSemesterSchedule":
+                    payload = callSession("get_semester_schedule");
+                    if (payload.optBoolean("ok")) {
+                        WidgetSupport.saveSemesterSchedule(getApplicationContext(), payload);
+                    }
                     break;
                 case "getEnergy":
                     payload = callSession("get_energy");
                     recordEnergySamples(payload);
+                    if (payload.optBoolean("ok")) {
+                        try {
+                            WidgetSupport.saveCache(
+                                getApplicationContext(), WidgetSupport.KEY_ENERGY, payload
+                            );
+                            EnergyWidgetProvider.renderCached(getApplicationContext());
+                        } catch (Exception ignored) {
+                            // 小组件同步失败不影响前台电量展示。
+                        }
+                    }
+                    break;
+                case "getCardBalance":
+                    payload = callSession("get_card_balance");
+                    break;
+                case "getFreeRoomMeta":
+                    payload = callSession("get_free_room_meta", number(args, "campus_id"));
+                    break;
+                case "getFreeRooms":
+                    payload = callSession(
+                        "get_free_rooms",
+                        number(args, "campus_id"),
+                        string(args, "building_id"),
+                        string(args, "date"),
+                        string(args, "units"),
+                        number(args, "room_type"),
+                        number(args, "min_seats")
+                    );
                     break;
                 case "rechargeEnergy":
                     payload = callSession(

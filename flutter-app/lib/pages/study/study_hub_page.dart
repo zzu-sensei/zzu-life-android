@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../../widgets/miuix_components.dart';
 import 'exam_page.dart';
+import 'free_room_page.dart';
 import 'grades_page.dart';
 import 'program_plan_page.dart';
 
-/// 「学习」入口的多标签容器：成绩 / 考试 / 培养计划。
+/// 「学习」入口的多标签容器：成绩 / 考试 / 培养 / 空教室。
 ///
 /// 子页采用懒加载策略：首次切到对应标签时才挂载组件并发起网络请求，避免冷启动
 /// 时同时冲击单线程原生通道。
@@ -38,7 +39,8 @@ class _StudyHubPageState extends State<StudyHubPage> {
             items: const [
               (value: 0, label: '成绩'),
               (value: 1, label: '考试'),
-              (value: 2, label: '培养计划'),
+              (value: 2, label: '培养'),
+              (value: 3, label: '空教室'),
             ],
             onChanged: _selectTab,
           ),
@@ -55,6 +57,9 @@ class _StudyHubPageState extends State<StudyHubPage> {
                   : const SizedBox.shrink(),
               _mountedTabs.contains(2)
                   ? const ProgramPlanPage()
+                  : const SizedBox.shrink(),
+              _mountedTabs.contains(3)
+                  ? const FreeRoomPage()
                   : const SizedBox.shrink(),
             ],
           ),

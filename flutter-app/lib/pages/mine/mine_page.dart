@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../../core/ai_service.dart';
 import '../../core/formatters.dart';
 import '../../core/native_api.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/miuix_components.dart';
+import '../ai/ai_config_sheet.dart';
 import 'network_page.dart';
 
-/// 「我的」页面：账号名片、校园网入口、主题模式切换、后台巡检总览、应用更新与退出登录。
+/// 「我的」页面：账号名片、校园网/AI 配置、主题模式切换、后台巡检总览、应用更新与退出登录。
 class MinePage extends StatefulWidget {
   const MinePage({
     super.key,
@@ -15,6 +17,7 @@ class MinePage extends StatefulWidget {
     required this.onLogout,
     this.updateInfo,
     this.onUpdateInfoChanged,
+    this.onAiConfigChanged,
   });
 
   final String account;
@@ -22,6 +25,7 @@ class MinePage extends StatefulWidget {
   final Future<void> Function() onLogout;
   final Map<String, dynamic>? updateInfo;
   final ValueChanged<Map<String, dynamic>>? onUpdateInfoChanged;
+  final VoidCallback? onAiConfigChanged;
 
   @override
   State<MinePage> createState() => _MinePageState();
@@ -29,11 +33,28 @@ class MinePage extends StatefulWidget {
 
 class _MinePageState extends State<MinePage> {
   Map<String, dynamic>? _monitorSettings;
+  AiConfig _aiConfig = const AiConfig();
 
   @override
   void initState() {
     super.initState();
     _loadMonitorSummary();
+    _loadAiConfig();
+  }
+
+  Future<void> _loadAiConfig() async {
+    try {
+      final raw = await NativeApi.call('getAiConfig');
+      if (mounted) setState(() => _aiConfig = AiConfig.fromJson(raw));
+    } catch (_) {}
+  }
+
+  Future<void> _openAiConfigSheet() async {
+    final updated = await showAiConfigSheet(context, initialConfig: _aiConfig);
+    if (updated != null && mounted) {
+      setState(() => _aiConfig = updated);
+      widget.onAiConfigChanged?.call();
+    }
   }
 
   Future<void> _loadMonitorSummary() async {
@@ -136,32 +157,139 @@ class _MinePageState extends State<MinePage> {
       context,
       builder: (sheetContext) {
         final palette = sheetContext.palette;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const MiuixSheetHeader(
-              title: '桌面小组件',
-              subtitle: '在手机桌面直接查看今日课表、周课表与寝室余电',
-            ),
-            const SizedBox(height: 16),
-            MiuixCard(
-              color: palette.cardSubtle,
-              showShadow: false,
-              radius: 16,
-              padding: const EdgeInsets.all(14),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  InfoRow(Icons.touch_app_outlined, '1. 长按手机桌面空白处，打开桌面插件/小组件列表。'),
-                  SizedBox(height: 10),
-                  InfoRow(Icons.widgets_outlined, '2. 搜索或向下滑动找到「郑大生活助手」。'),
-                  SizedBox(height: 10),
-                  InfoRow(Icons.add_box_outlined, '3. 拖放「今日课表」「本周课表」或「寝室电量」小组件到桌面即可。'),
+        String? statusMessage;
+        bool isErrorStatus = false;
+
+        return StatefulBuilder(
+          builder: (stateContext, setSheetState) {
+            Future<void> triggerPin(String type, String label) async {
+              try {
+                final result = await NativeApi.call('pinWidget', {
+                  'type': type,
+                });
+                final supported = result['supported'] == true;
+                final requested = result['requested'] == true;
+                if (!sheetContext.mounted) return;
+                setSheetState(() {
+                  isErrorStatus = !(supported && requested);
+                  statusMessage = (supported && requested)
+                      ? '已向系统桌面请求添加「$label」。若桌面未弹出确认窗，请点击下方「打开应用权限设置」开启「桌面快捷方式」后再试。'
+                      : '当前系统桌面未响应快捷固定，请返回桌面双指捏合 → 添加小部件 → 底部「Android 小部件」中查找「郑大生活助手」。';
+                });
+              } catch (caught) {
+                if (!sheetContext.mounted) return;
+                setSheetState(() {
+                  isErrorStatus = true;
+                  statusMessage = '调用失败：$caught';
+                });
+              }
+            }
+
+            Future<void> openPermissionSettings() async {
+              try {
+                await NativeApi.call('openAppSettings');
+              } catch (caught) {
+                if (!sheetContext.mounted) return;
+                setSheetState(() {
+                  isErrorStatus = true;
+                  statusMessage = '无法打开应用设置：$caught';
+                });
+              }
+            }
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const MiuixSheetHeader(
+                  title: '桌面小组件',
+                  subtitle: '点击下方任意卡片尝试一键固定到桌面，或查看 HyperOS 添加说明',
+                ),
+                const SizedBox(height: 14),
+                MiuixGroupedCard(
+                  children: [
+                    MiuixTile(
+                      icon: Icons.today_rounded,
+                      iconColor: palette.primary,
+                      title: '今日课表',
+                      subtitle: '当日日程卡片 · 进行中/下一节状态高亮',
+                      trailingText: '添加',
+                      onTap: () => triggerPin('today', '今日课表'),
+                    ),
+                    MiuixTile(
+                      icon: Icons.calendar_view_week_rounded,
+                      iconColor: palette.info,
+                      title: '整周课表',
+                      subtitle: '七天彩色课程表 · 支持离线缓存零流量刷新',
+                      trailingText: '添加',
+                      onTap: () => triggerPin('week', '整周课表'),
+                    ),
+                    MiuixTile(
+                      icon: Icons.electric_bolt_rounded,
+                      iconColor: palette.warning,
+                      title: '寝室电量',
+                      subtitle: '照明与空调剩余度数 · 低电阈值红标提醒',
+                      trailingText: '添加',
+                      onTap: () => triggerPin('energy', '寝室电量'),
+                    ),
+                  ],
+                ),
+                if (statusMessage != null) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: ShapeDecoration(
+                      color: isErrorStatus
+                          ? palette.warningSoft
+                          : palette.primarySoft,
+                      shape: miuixShape(14),
+                    ),
+                    child: Text(
+                      statusMessage!,
+                      style: TextStyle(
+                        color: isErrorStatus
+                            ? palette.warning
+                            : palette.onPrimarySoft,
+                        fontSize: 12,
+                        height: 1.45,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 ],
-              ),
-            ),
-          ],
+                const SizedBox(height: 12),
+                MiuixCard(
+                  color: palette.cardSubtle,
+                  showShadow: false,
+                  radius: 16,
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const InfoRow(
+                        Icons.security_rounded,
+                        '小米 / 澎湃 OS 若点击「添加」无弹窗，请到系统「权限管理」中允许本应用「桌面快捷方式」。',
+                      ),
+                      const SizedBox(height: 10),
+                      const InfoRow(
+                        Icons.touch_app_outlined,
+                        '手动添加：桌面双指捏合 → 添加小部件 → 拉到底部进入「Android 小部件 / 全部小组件」→ 搜索「郑大生活助手」。',
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: openPermissionSettings,
+                          icon: const Icon(Icons.settings_outlined, size: 17),
+                          label: const Text('打开应用权限设置'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -266,6 +394,15 @@ class _MinePageState extends State<MinePage> {
         ),
         MiuixGroupedCard(
           children: [
+            MiuixTile(
+              icon: Icons.auto_awesome_outlined,
+              iconColor: palette.primary,
+              title: 'AI 助手配置',
+              subtitle: _aiConfig.isConfigured
+                  ? '已配置 · ${_aiConfig.model}'
+                  : '配置自定义 OpenAI 兼容 API（DeepSeek / OpenAI 等）',
+              onTap: _openAiConfigSheet,
+            ),
             MiuixTile(
               icon: Icons.wifi_rounded,
               iconColor: palette.info,

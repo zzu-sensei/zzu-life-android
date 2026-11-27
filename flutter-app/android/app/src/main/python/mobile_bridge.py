@@ -15,6 +15,7 @@ import threading
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
+from mobile_schedule_cache import group_semester_lessons
 from mobile_zzupy import (
     MobileCASClient,
     MobileEASClient,
@@ -22,6 +23,7 @@ from mobile_zzupy import (
     MobileNetworkClient,
     MobileWebEASClient,
     discover_meter_energy,
+    get_portal_card_balance,
 )
 
 #: 校园网自助服务系统默认地址（只在校园网内可达）。
@@ -682,6 +684,41 @@ def get_today_schedule(account: str, user_token: str, refresh_token: str) -> str
     return _with_cas(account, user_token, refresh_token, operation)
 
 
+def get_semester_schedule(account: str, user_token: str, refresh_token: str) -> str:
+    """Fetch and group the entire current semester schedule for offline caching."""
+
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        eas = MobileEASClient(cas)
+        try:
+            eas.login()
+            payload = _schedule_payload(eas, None, None)
+            semester = eas.current_semester or {}
+            semester_id = int(semester.get("id") or 0)
+            semester_name = str(
+                semester.get("nameZh") or semester.get("name") or "当前学期"
+            )
+            start_date = str(semester.get("startDate") or "")[:10]
+            current_week = eas.resolve_current_week(date.today().isoformat())
+            grouped = group_semester_lessons(
+                payload["lessons"],
+                start_date,
+                semester.get("weekIndices"),
+            )
+            return {
+                "semester_id": semester_id,
+                "semester_name": semester_name,
+                "start_date": start_date,
+                "current_week": current_week,
+                "max_week": grouped["max_week"],
+                "total_lessons": grouped["total_lessons"],
+                "weeks": grouped["weeks"],
+            }
+        finally:
+            eas.close()
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
+
 def _ics_escape(value: Any) -> str:
     return (
         str(value or "")
@@ -825,6 +862,83 @@ def recharge_energy(
             }
         finally:
             ecard.close()
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
+
+def get_card_balance(account: str, user_token: str, refresh_token: str) -> str:
+    """获取一卡通余额与校园邮箱未读数。"""
+
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        return get_portal_card_balance(cas)
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
+
+def get_free_room_meta(
+    account: str,
+    user_token: str,
+    refresh_token: str,
+    campus_id: int = 0,
+) -> str:
+    """获取空闲教室查询所需的校区、教学楼、节次与教室类型元数据。"""
+
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        web = MobileWebEASClient(cas)
+        try:
+            web.login()
+            return web.get_room_free_meta(campus_id if campus_id > 0 else None)
+        finally:
+            web.close()
+
+    return _with_cas(account, user_token, refresh_token, operation)
+
+
+def get_free_rooms(
+    account: str,
+    user_token: str,
+    refresh_token: str,
+    campus_id: int,
+    building_id: str,
+    date_str: str,
+    units_csv: str,
+    room_type: int,
+    min_seats: int,
+) -> str:
+    """按校区、教学楼、日期与节次查询空闲教室。"""
+    parsed_units = sorted(
+        {
+            int(part.strip())
+            for part in str(units_csv or "").split(",")
+            if part.strip().isdigit() and int(part.strip()) > 0
+        }
+    )
+    if not parsed_units:
+        return _error(ValueError("请至少选择一个节次"))
+    target_date = str(date_str or "").strip()[:10] or date.today().isoformat()
+    target_campus = int(campus_id) if int(campus_id) > 0 else 2
+
+    def operation(cas: MobileCASClient) -> dict[str, Any]:
+        web = MobileWebEASClient(cas)
+        try:
+            web.login()
+            rooms = web.query_free_rooms(
+                campus_id=target_campus,
+                date_str=target_date,
+                units=parsed_units,
+                building_id=str(building_id or "").strip(),
+                room_type=int(room_type) if int(room_type) > 0 else None,
+                min_seats=int(min_seats) if int(min_seats) > 0 else None,
+            )
+            return {
+                "campus_id": target_campus,
+                "date": target_date,
+                "units": parsed_units,
+                "count": len(rooms),
+                "rooms": rooms,
+            }
+        finally:
+            web.close()
 
     return _with_cas(account, user_token, refresh_token, operation)
 

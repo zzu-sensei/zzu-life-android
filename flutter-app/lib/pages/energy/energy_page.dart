@@ -32,10 +32,16 @@ class _EnergyPageState extends State<EnergyPage> {
   final TextEditingController emailSecret = TextEditingController();
   String? error;
 
+  double? cardBalance;
+  int? emailUnread;
+  bool cardLoading = true;
+  String? cardError;
+
   @override
   void initState() {
     super.initState();
     load();
+    loadCardBalance();
     loadMonitorSettings();
     loadDrainSamples();
   }
@@ -98,6 +104,28 @@ class _EnergyPageState extends State<EnergyPage> {
       return false;
     } finally {
       if (mounted) setState(() => alertSaving = false);
+    }
+  }
+
+  Future<void> loadCardBalance() async {
+    if (mounted) {
+      setState(() {
+        cardLoading = true;
+        cardError = null;
+      });
+    }
+    try {
+      final result = await NativeApi.call('getCardBalance');
+      if (!mounted) return;
+      setState(() {
+        cardBalance = (result['balance'] as num?)?.toDouble();
+        emailUnread = (result['email_unread'] as num?)?.toInt();
+        cardError = null;
+      });
+    } catch (caught) {
+      if (mounted) setState(() => cardError = caught.toString());
+    } finally {
+      if (mounted) setState(() => cardLoading = false);
     }
   }
 
@@ -706,7 +734,7 @@ class _EnergyPageState extends State<EnergyPage> {
           SnackBar(content: Text(result['message']?.toString() ?? '充值请求已提交')),
         );
       }
-      await load();
+      await Future.wait([load(), loadCardBalance()]);
     } catch (caught) {
       // 保留电表卡片展示，以提示形式告知错误，不覆盖整页。
       if (mounted) {
@@ -757,8 +785,13 @@ class _EnergyPageState extends State<EnergyPage> {
               ? '读取一卡通默认房间与实际电表'
               : '寝室 ${data!['room'] ?? '--'}',
           action: IconButton.filledTonal(
-            tooltip: '刷新电量',
-            onPressed: loading || recharging ? null : load,
+            tooltip: '刷新电量与校园卡余额',
+            onPressed: loading || recharging
+                ? null
+                : () {
+                    load();
+                    loadCardBalance();
+                  },
             icon: const Icon(Icons.refresh_rounded, size: 20),
           ),
         ),
@@ -766,12 +799,26 @@ class _EnergyPageState extends State<EnergyPage> {
           child: loading
               ? const Center(child: Loader())
               : error != null
-              ? ErrorState(message: error!, retry: load)
+              ? ErrorState(
+                  message: error!,
+                  retry: () async {
+                    loadCardBalance();
+                    await load();
+                  },
+                )
               : RefreshIndicator(
-                  onRefresh: load,
+                  onRefresh: () => Future.wait([load(), loadCardBalance()]),
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
                     children: [
+                      _CampusCardBanner(
+                        balance: cardBalance,
+                        emailUnread: emailUnread,
+                        loading: cardLoading,
+                        error: cardError,
+                        onRefresh: cardLoading ? null : loadCardBalance,
+                      ),
+                      const SizedBox(height: 12),
                       for (var index = 0; index < meters.length; index++) ...[
                         MeterCard(
                           type: (meters[index]['label'] ?? '寝室电表').toString(),
@@ -1214,4 +1261,124 @@ class _MiniSparkPainter extends CustomPainter {
   @override
   bool shouldRepaint(_MiniSparkPainter old) =>
       old.values != values || old.color != color;
+}
+
+class _CampusCardBanner extends StatelessWidget {
+  const _CampusCardBanner({
+    required this.balance,
+    required this.emailUnread,
+    required this.loading,
+    required this.error,
+    required this.onRefresh,
+  });
+
+  final double? balance;
+  final int? emailUnread;
+  final bool loading;
+  final String? error;
+  final VoidCallback? onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final hasValue = balance != null;
+
+    return MiuixCard(
+      radius: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      onTap: onRefresh,
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: ShapeDecoration(
+              color: palette.primarySoft,
+              shape: miuixShape(12),
+            ),
+            child: Icon(
+              Icons.credit_card_rounded,
+              color: palette.primary,
+              size: 21,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      '校园一卡通余额',
+                      style: TextStyle(
+                        color: palette.ink,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (emailUnread != null && emailUnread! > 0) ...[
+                      const SizedBox(width: 6),
+                      MiuixTag(
+                        '邮箱 $emailUnread 未读',
+                        color: palette.info,
+                        backgroundColor: palette.infoSoft,
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  error != null && !hasValue
+                      ? '获取失败 · 点按重试'
+                      : '门户实时余额 · 点按刷新',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: error != null && !hasValue
+                        ? palette.danger
+                        : palette.inkMuted,
+                    fontSize: 11.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (loading && !hasValue)
+            const Loader(size: 18)
+          else
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  '¥',
+                  style: TextStyle(
+                    color: palette.primary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(width: 1),
+                Text(
+                  hasValue ? balance!.toStringAsFixed(2) : '--',
+                  style: TextStyle(
+                    color: palette.ink,
+                    fontSize: 23,
+                    fontWeight: FontWeight.w800,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+                if (loading) ...[
+                  const SizedBox(width: 8),
+                  const Loader(size: 13),
+                ],
+              ],
+            ),
+        ],
+      ),
+    );
+  }
 }

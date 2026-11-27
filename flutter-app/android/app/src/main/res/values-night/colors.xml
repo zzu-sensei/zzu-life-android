@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_ink">#F3F5F8</color>
+    <color name="widget_ink_secondary">#A5AEBC</color>
+    <color name="widget_ink_muted">#6E7785</color>
+    <color name="widget_primary">#4D96FF</color>
+    <color name="widget_pill_text">#6BA9FF</color>
+</resources>
