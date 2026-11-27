@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import date as date_type
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import gmalg
 from cryptography.hazmat.primitives import serialization
@@ -693,37 +693,43 @@ class MobileWebEASClient:
         return response.content
 
     def get_personal_profile(self) -> dict:
-        """获取教务系统首页姓名及个人头像；未设置个人头像时不回退证件照。"""
+        """获取教务系统首页姓名及个人头像；不回退学籍证件照。"""
         response = self.client.get(self.HOME_PAGE, headers=self.headers)
         response.raise_for_status()
         if self._looks_like_login(response):
             raise RuntimeError("教务网页会话已失效，请重新登录。")
 
         profile = mobile_profile_page.parse_home_profile(response.text)
+        default_bytes = profile.get("default_avatar_bytes") or b""
         avatar_base64 = ""
         avatar_mime = ""
-        if profile["has_portrait"]:
-            try:
-                avatar_resp = self.client.get(
-                    self.MY_AVATAR, headers=self.headers, timeout=15
+        try:
+            avatar_resp = self.client.get(
+                self.MY_AVATAR, headers=self.headers, timeout=15
+            )
+            content_type = str(avatar_resp.headers.get("content-type", ""))
+            is_distinct = (
+                profile["has_portrait"]
+                or not default_bytes
+                or avatar_resp.content != default_bytes
+            )
+            if (
+                avatar_resp.status_code == 200
+                and not self._looks_like_login(avatar_resp)
+                and mobile_profile_page.looks_like_image(
+                    avatar_resp.content, content_type
                 )
-                content_type = str(avatar_resp.headers.get("content-type", ""))
-                if (
-                    avatar_resp.status_code == 200
-                    and not self._looks_like_login(avatar_resp)
-                    and mobile_profile_page.looks_like_image(
-                        avatar_resp.content, content_type
-                    )
-                ):
-                    avatar_mime = mobile_profile_page.detect_image_mime(
-                        avatar_resp.content
-                    )
-                    avatar_base64 = base64.b64encode(avatar_resp.content).decode(
-                        "ascii"
-                    )
-            except BaseException:
-                avatar_base64 = ""
-                avatar_mime = ""
+                and is_distinct
+            ):
+                avatar_mime = mobile_profile_page.detect_image_mime(
+                    avatar_resp.content
+                )
+                avatar_base64 = base64.b64encode(avatar_resp.content).decode(
+                    "ascii"
+                )
+        except BaseException:
+            avatar_base64 = ""
+            avatar_mime = ""
 
         return {
             "name": profile["name"],
@@ -1061,6 +1067,162 @@ def get_meter_energy(ecard: MobileECardClient, default_room: str, meter_type: st
 PORTAL_CARDS = (
     "https://info.s.zzu.edu.cn/portal-api/v1/thrid-adapter/get-person-info-card-list"
 )
+PERSONAL_CENTER_BASE = "https://authx-service.s.zzu.edu.cn/personal/"
+
+
+def _fetch_valid_image(
+    client: HttpClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict | None = None,
+) -> tuple[bytes, str]:
+    response = client.get(url, headers=headers, params=params, timeout=15)
+    response.raise_for_status()
+    content_type = str(response.headers.get("content-type", ""))
+    if not mobile_profile_page.looks_like_image(response.content, content_type):
+        return b"", ""
+    return response.content, mobile_profile_page.detect_image_mime(response.content)
+
+
+def get_campus_personal_profile(cas: MobileCASClient) -> dict:
+    """聚合读取统一门户与教务系统的个人头像（含 GIF/WebP 动图，不抓学籍证件照）。"""
+    if not cas.user_token:
+        raise RuntimeError("登录已失效，请重新登录。")
+
+    name = ""
+    avatar_bytes = b""
+    avatar_mime = ""
+    source = ""
+    errors: list[str] = []
+
+    client = HttpClient(timeout=15)
+    try:
+        # 1. 统一门户个人中心（authx-service，直接放行部分高校自定义头像与动图）
+        portal_headers = {
+            "Authorization": f"Bearer {cas.user_token}",
+            "X-Id-Token": cas.user_token,
+        }
+        try:
+            info_resp = client.get(
+                f"{PERSONAL_CENTER_BASE}api/v1/personal/user/info",
+                headers=portal_headers,
+                timeout=12,
+            )
+            info_resp.raise_for_status()
+            parsed = mobile_profile_page.extract_profile_from_json(info_resp.json())
+            if parsed["name"] and not name:
+                name = parsed["name"]
+            ref = parsed["avatar_ref"]
+            if ref:
+                if ref.startswith("data:image/"):
+                    raw = mobile_profile_page.decode_data_uri_image(ref)
+                    if raw:
+                        avatar_bytes = raw
+                        avatar_mime = mobile_profile_page.detect_image_mime(raw)
+                elif ref.startswith(("http://", "https://")):
+                    avatar_bytes, avatar_mime = _fetch_valid_image(
+                        client, ref, headers=portal_headers
+                    )
+                else:
+                    try:
+                        avatar_bytes, avatar_mime = _fetch_valid_image(
+                            client,
+                            f"{PERSONAL_CENTER_BASE}api/v1/personal/user/info/portrait",
+                            headers=portal_headers,
+                            params={
+                                "fileType": "portrait",
+                                "imageUrl": ref,
+                                "idToken": cas.user_token,
+                            },
+                        )
+                    except BaseException:
+                        avatar_bytes = b""
+            if not avatar_bytes:
+                try:
+                    avatar_bytes, avatar_mime = _fetch_valid_image(
+                        client,
+                        f"{PERSONAL_CENTER_BASE}api/v1/me/portrait",
+                        headers=portal_headers,
+                        params={"token": cas.user_token},
+                    )
+                except BaseException:
+                    avatar_bytes = b""
+            if avatar_bytes:
+                source = "portal"
+        except BaseException as exc:
+            errors.append(str(exc))
+
+        # 2. 教务门户用户信息接口（eams-door user-info）
+        if not avatar_bytes or not name:
+            eams_headers = {"Authorization": cas.user_token}
+            try:
+                door_resp = client.get(
+                    MobileEASClient.USER_INFO, headers=eams_headers, timeout=12
+                )
+                door_resp.raise_for_status()
+                parsed = mobile_profile_page.extract_profile_from_json(door_resp.json())
+                if parsed["name"] and not name:
+                    name = parsed["name"]
+                ref = parsed["avatar_ref"]
+                if ref and not avatar_bytes:
+                    if ref.startswith("data:image/"):
+                        raw = mobile_profile_page.decode_data_uri_image(ref)
+                        if raw:
+                            avatar_bytes = raw
+                            avatar_mime = mobile_profile_page.detect_image_mime(raw)
+                    else:
+                        target_url = (
+                            ref
+                            if ref.startswith(("http://", "https://"))
+                            else urljoin("https://jwxt.zzu.edu.cn/", ref)
+                        )
+                        avatar_bytes, avatar_mime = _fetch_valid_image(
+                            client, target_url, headers=eams_headers
+                        )
+                    if avatar_bytes:
+                        source = "eams_door"
+            except BaseException as exc:
+                errors.append(str(exc))
+    finally:
+        client.close()
+
+    # 3. 教务学生端（/student/home + /student/my/avatar）
+    if not avatar_bytes or not name:
+        web = MobileWebEASClient(cas)
+        try:
+            web.login()
+            web_profile = web.get_personal_profile()
+            if web_profile.get("name") and not name:
+                name = str(web_profile["name"])
+            if not avatar_bytes and web_profile.get("has_portrait") and web_profile.get("avatar_base64"):
+                avatar_base64 = str(web_profile["avatar_base64"])
+                avatar_mime = str(web_profile.get("avatar_mime") or "")
+                source = "eams_student"
+                return {
+                    "name": name,
+                    "has_portrait": True,
+                    "avatar_base64": avatar_base64,
+                    "avatar_mime": avatar_mime,
+                    "source": source,
+                }
+        except BaseException as exc:
+            errors.append(str(exc))
+        finally:
+            web.close()
+
+    if not name and not avatar_bytes and len(errors) >= 3:
+        raise RuntimeError(errors[0] or "暂时无法连接学校个人头像服务")
+
+    return {
+        "name": name,
+        "has_portrait": bool(avatar_bytes),
+        "avatar_base64": (
+            base64.b64encode(avatar_bytes).decode("ascii") if avatar_bytes else ""
+        ),
+        "avatar_mime": avatar_mime,
+        "source": source,
+    }
 
 
 def get_portal_card_balance(cas: MobileCASClient) -> dict:

@@ -24,6 +24,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -42,8 +43,12 @@ public class MainActivity extends FlutterActivity {
     private static final int SAVE_FILE_REQUEST = 8104;
     /** 申请通知权限，用于「发现新版本」的提醒。 */
     private static final int REQUEST_UPDATE_NOTIFY = 8105;
+    private static final int PICK_AVATAR_REQUEST = 8106;
     private static final String PROFILE_CACHE_FILE = "user_profile_cache.json";
+    private static final String CUSTOM_AVATAR_FILE = "custom_avatar.bin";
+    private static final int MAX_CUSTOM_AVATAR_BYTES = 10 * 1024 * 1024;
     private MethodChannel.Result pendingSaveResult;
+    private MethodChannel.Result pendingAvatarResult;
     private String pendingSaveContent;
     private WebView printingWebView;
 
@@ -92,6 +97,28 @@ public class MainActivity extends FlutterActivity {
         }
         if ("saveFile".equals(call.method)) {
             startSaveFile(call, result);
+            return;
+        }
+        if ("pickCustomAvatar".equals(call.method)) {
+            startPickAvatar(result);
+            return;
+        }
+        if ("setAvatarMode".equals(call.method)) {
+            String rawMode = call.argument("mode");
+            String mode = "default".equals(rawMode) ? "default" : "auto";
+            executor.execute(() -> {
+                try {
+                    clearCustomAvatarFile();
+                    updateAvatarModeInCache(mode);
+                    JSONObject payload = new JSONObject();
+                    payload.put("ok", true);
+                    payload.put("avatar_mode", mode);
+                    String text = payload.toString();
+                    runOnUiThread(() -> result.success(text));
+                } catch (Exception error) {
+                    runOnUiThread(() -> result.error("AVATAR_MODE", describe(error), null));
+                }
+            });
             return;
         }
         if ("printDocument".equals(call.method)) {
@@ -601,9 +628,65 @@ public class MainActivity extends FlutterActivity {
         }
     }
 
+    private void startPickAvatar(MethodChannel.Result result) {
+        if (pendingAvatarResult != null) {
+            result.error("AVATAR_BUSY", "正在选择头像，请稍候", null);
+            return;
+        }
+        pendingAvatarResult = result;
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("image/*");
+        startActivityForResult(Intent.createChooser(intent, "选择头像图片（支持动图）"), PICK_AVATAR_REQUEST);
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PICK_AVATAR_REQUEST && pendingAvatarResult != null) {
+            MethodChannel.Result callback = pendingAvatarResult;
+            pendingAvatarResult = null;
+            if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+                callback.success("{\"ok\":true,\"cancelled\":true}");
+                return;
+            }
+            Uri uri = data.getData();
+            executor.execute(() -> {
+                try (InputStream stream = getContentResolver().openInputStream(uri);
+                     ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+                    if (stream == null) throw new IllegalStateException("无法读取所选图片");
+                    byte[] chunk = new byte[8192];
+                    int total = 0;
+                    int read;
+                    while ((read = stream.read(chunk)) != -1) {
+                        total += read;
+                        if (total > MAX_CUSTOM_AVATAR_BYTES) {
+                            throw new IllegalArgumentException("图片超过 10MB，请选择更小的图片");
+                        }
+                        buffer.write(chunk, 0, read);
+                    }
+                    byte[] raw = buffer.toByteArray();
+                    if (!isSupportedAvatarImage(raw)) {
+                        throw new IllegalArgumentException("不支持的图片格式，请选择 PNG / JPG / GIF / WebP");
+                    }
+                    File target = new File(getFilesDir(), CUSTOM_AVATAR_FILE);
+                    try (FileOutputStream out = new FileOutputStream(target)) {
+                        out.write(raw);
+                    }
+                    updateAvatarModeInCache("custom");
+                    JSONObject payload = new JSONObject();
+                    payload.put("ok", true);
+                    payload.put("cancelled", false);
+                    payload.put("avatar_mode", "custom");
+                    payload.put("avatar_base64", Base64.encodeToString(raw, Base64.NO_WRAP));
+                    String text = payload.toString();
+                    runOnUiThread(() -> callback.success(text));
+                } catch (Exception error) {
+                    runOnUiThread(() -> callback.error("PICK_AVATAR", describe(error), null));
+                }
+            });
+            return;
+        }
         if (requestCode != SAVE_FILE_REQUEST || pendingSaveResult == null) return;
         MethodChannel.Result callback = pendingSaveResult;
         pendingSaveResult = null;
@@ -642,15 +725,33 @@ public class MainActivity extends FlutterActivity {
         return value instanceof Number ? ((Number) value).intValue() : 0;
     }
 
-    private JSONObject loadProfileCache() {
-        JSONObject empty = new JSONObject();
+    private static boolean isSupportedAvatarImage(byte[] data) {
+        if (data == null || data.length < 4 || data.length > MAX_CUSTOM_AVATAR_BYTES) {
+            return false;
+        }
+        if (data.length >= 8
+                && (data[0] & 0xFF) == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G'
+                && data[4] == '\r' && data[5] == '\n' && data[6] == 0x1A && data[7] == '\n') {
+            return true;
+        }
+        if ((data[0] & 0xFF) == 0xFF && (data[1] & 0xFF) == 0xD8 && (data[2] & 0xFF) == 0xFF) {
+            return true;
+        }
+        if (data.length >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F'
+                && data[3] == '8' && (data[4] == '7' || data[4] == '9') && data[5] == 'a') {
+            return true;
+        }
+        if (data.length >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F'
+                && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P') {
+            return true;
+        }
+        return data[0] == 'B' && data[1] == 'M';
+    }
+
+    private JSONObject readProfileCacheObject(String expectedAccount) {
         try {
-            empty.put("ok", true);
-            empty.put("cached", false);
-            String[] stored = SessionStore.load(this);
-            if (stored == null) return empty;
             File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
-            if (!file.isFile()) return empty;
+            if (!file.isFile()) return null;
             try (FileInputStream in = new FileInputStream(file);
                  ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192];
@@ -659,13 +760,80 @@ public class MainActivity extends FlutterActivity {
                     out.write(buffer, 0, read);
                 }
                 JSONObject cached = new JSONObject(out.toString(StandardCharsets.UTF_8.name()));
-                if (!stored[0].equals(cached.optString("account"))) {
-                    return empty;
+                if (!expectedAccount.equals(cached.optString("account"))) {
+                    return null;
                 }
-                cached.put("ok", true);
-                cached.put("cached", true);
                 return cached;
             }
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void writeProfileCacheObject(JSONObject cached) throws Exception {
+        File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(cached.toString().getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private void updateAvatarModeInCache(String mode) {
+        try {
+            String[] stored = SessionStore.load(this);
+            if (stored == null) return;
+            JSONObject cached = readProfileCacheObject(stored[0]);
+            if (cached == null) {
+                cached = new JSONObject();
+                cached.put("account", stored[0]);
+            }
+            cached.put("avatar_mode", mode);
+            cached.put("updated_at", System.currentTimeMillis());
+            writeProfileCacheObject(cached);
+        } catch (Exception ignored) {
+            // 模式写入失败不影响当前展示。
+        }
+    }
+
+    private JSONObject loadProfileCache() {
+        JSONObject empty = new JSONObject();
+        try {
+            empty.put("ok", true);
+            empty.put("cached", false);
+            empty.put("avatar_mode", "auto");
+            String[] stored = SessionStore.load(this);
+            if (stored == null) return empty;
+            JSONObject cached = readProfileCacheObject(stored[0]);
+            if (cached == null) {
+                cached = new JSONObject();
+                cached.put("account", stored[0]);
+                cached.put("cached", false);
+            } else {
+                cached.put("cached", true);
+            }
+            String mode = cached.optString("avatar_mode", "auto");
+            if (!"custom".equals(mode) && !"default".equals(mode)) {
+                mode = "auto";
+            }
+            if ("custom".equals(mode)) {
+                File customFile = new File(getFilesDir(), CUSTOM_AVATAR_FILE);
+                if (customFile.isFile() && customFile.length() > 0 && customFile.length() <= MAX_CUSTOM_AVATAR_BYTES) {
+                    try (FileInputStream in = new FileInputStream(customFile);
+                         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                        byte[] buf = new byte[8192];
+                        int read;
+                        while ((read = in.read(buf)) != -1) {
+                            out.write(buf, 0, read);
+                        }
+                        cached.put("custom_avatar_base64", Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP));
+                        cached.put("cached", true);
+                    }
+                } else {
+                    mode = "auto";
+                }
+            }
+            cached.put("avatar_mode", mode);
+            cached.put("ok", true);
+            return cached;
         } catch (Exception ignored) {
             return empty;
         }
@@ -675,23 +843,36 @@ public class MainActivity extends FlutterActivity {
         try {
             String[] stored = SessionStore.load(this);
             if (stored == null) return;
+            JSONObject existing = readProfileCacheObject(stored[0]);
+            String mode = existing == null ? "auto" : existing.optString("avatar_mode", "auto");
+            if (!"custom".equals(mode) && !"default".equals(mode)) {
+                mode = "auto";
+            }
             JSONObject cached = new JSONObject();
             cached.put("account", stored[0]);
             cached.put("name", payload.optString("name", ""));
             cached.put("has_portrait", payload.optBoolean("has_portrait", false));
             cached.put("avatar_base64", payload.optString("avatar_base64", ""));
             cached.put("avatar_mime", payload.optString("avatar_mime", ""));
+            cached.put("source", payload.optString("source", ""));
+            cached.put("avatar_mode", mode);
             cached.put("updated_at", System.currentTimeMillis());
-            File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
-            try (FileOutputStream out = new FileOutputStream(file)) {
-                out.write(cached.toString().getBytes(StandardCharsets.UTF_8));
-            }
+            writeProfileCacheObject(cached);
         } catch (Exception ignored) {
             // 头像缓存写入失败不影响接口返回。
         }
     }
 
+    private void clearCustomAvatarFile() {
+        File customFile = new File(getFilesDir(), CUSTOM_AVATAR_FILE);
+        if (customFile.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            customFile.delete();
+        }
+    }
+
     private void clearProfileCache() {
+        clearCustomAvatarFile();
         File file = new File(getFilesDir(), PROFILE_CACHE_FILE);
         if (file.exists()) {
             //noinspection ResultOfMethodCallIgnored

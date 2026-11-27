@@ -23,6 +23,7 @@ from mobile_zzupy import (
     MobileNetworkClient,
     MobileWebEASClient,
     discover_meter_energy,
+    get_campus_personal_profile,
     get_portal_card_balance,
 )
 
@@ -944,15 +945,10 @@ def get_free_rooms(
 
 
 def get_user_profile(account: str, user_token: str, refresh_token: str) -> str:
-    """获取教务系统首页姓名与个人头像（不回退学籍证件照）。"""
+    """获取统一门户及教务系统个人头像与姓名（不回退学籍证件照）。"""
 
     def operation(cas: MobileCASClient) -> dict[str, Any]:
-        web = MobileWebEASClient(cas)
-        try:
-            web.login()
-            return web.get_personal_profile()
-        finally:
-            web.close()
+        return get_campus_personal_profile(cas)
 
     return _with_cas(account, user_token, refresh_token, operation)
 

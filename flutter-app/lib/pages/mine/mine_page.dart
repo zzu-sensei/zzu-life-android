@@ -37,7 +37,10 @@ class MinePage extends StatefulWidget {
 class _MinePageState extends State<MinePage> {
   Map<String, dynamic>? _monitorSettings;
   AiConfig _aiConfig = const AiConfig();
-  Uint8List? _avatarBytes;
+  Uint8List? _campusAvatarBytes;
+  Uint8List? _customAvatarBytes;
+  String _avatarMode = 'auto';
+  String _avatarSource = '';
   String _displayName = '';
   bool _profileLoading = false;
 
@@ -49,34 +52,75 @@ class _MinePageState extends State<MinePage> {
     _loadProfile();
   }
 
-  void _applyProfilePayload(Map<String, dynamic> payload) {
-    final name = (payload['name'] ?? '').toString().trim();
-    final hasPortrait = payload['has_portrait'] == true;
-    final rawBase64 = (payload['avatar_base64'] ?? '').toString().trim();
-    Uint8List? bytes;
-    if (hasPortrait && rawBase64.isNotEmpty) {
-      try {
-        final decoded = base64Decode(rawBase64);
-        if (decoded.isNotEmpty) {
-          bytes = decoded;
-        }
-      } catch (_) {
-        bytes = null;
-      }
+  Uint8List? _decodeAvatarBytes(Object? raw) {
+    final text = (raw ?? '').toString().trim();
+    if (text.isEmpty) return null;
+    try {
+      final decoded = base64Decode(text);
+      return decoded.isNotEmpty ? decoded : null;
+    } catch (_) {
+      return null;
     }
+  }
+
+  Uint8List? get _effectiveAvatarBytes {
+    if (_avatarMode == 'custom') return _customAvatarBytes;
+    if (_avatarMode == 'default') return null;
+    return _campusAvatarBytes;
+  }
+
+  String _avatarStatusLabel() {
+    if (_avatarMode == 'custom' && _customAvatarBytes != null) {
+      return '当前使用：自定义头像';
+    }
+    if (_avatarMode == 'default') {
+      return '当前使用：默认头像';
+    }
+    if (_campusAvatarBytes != null) {
+      return switch (_avatarSource) {
+        'portal' => '当前使用：统一门户个人头像',
+        'eams_door' || 'eams_student' => '当前使用：教务系统个人头像',
+        _ => '当前使用：学校个人头像',
+      };
+    }
+    return '当前使用：默认头像（未检测到学校个人头像）';
+  }
+
+  void _applyProfilePayload(Map<String, dynamic> payload, {required bool fromCache}) {
+    final name = (payload['name'] ?? '').toString().trim();
+    final source = (payload['source'] ?? '').toString().trim();
+    final campusBytes = payload['has_portrait'] == true
+        ? _decodeAvatarBytes(payload['avatar_base64'])
+        : null;
+    final rawMode = (payload['avatar_mode'] ?? '').toString().trim();
+    final customBytes = fromCache
+        ? _decodeAvatarBytes(payload['custom_avatar_base64'])
+        : null;
+
     if (!mounted) return;
     setState(() {
       if (name.isNotEmpty) _displayName = name;
-      _avatarBytes = bytes;
+      _campusAvatarBytes = campusBytes;
+      if (source.isNotEmpty || campusBytes == null) _avatarSource = source;
+      if (fromCache) {
+        if (rawMode == 'custom' && customBytes != null) {
+          _avatarMode = 'custom';
+          _customAvatarBytes = customBytes;
+        } else if (rawMode == 'default') {
+          _avatarMode = 'default';
+          _customAvatarBytes = null;
+        } else {
+          _avatarMode = 'auto';
+          _customAvatarBytes = null;
+        }
+      }
     });
   }
 
   Future<void> _loadProfile() async {
     try {
       final cached = await NativeApi.call('getCachedProfile');
-      if (cached['cached'] == true) {
-        _applyProfilePayload(cached);
-      }
+      _applyProfilePayload(cached, fromCache: true);
     } catch (_) {}
     await _refreshProfile(userInitiated: false);
   }
@@ -86,13 +130,14 @@ class _MinePageState extends State<MinePage> {
     if (mounted) setState(() => _profileLoading = true);
     try {
       final profile = await NativeApi.call('getUserProfile');
-      _applyProfilePayload(profile);
+      _applyProfilePayload(profile, fromCache: false);
       if (userInitiated && mounted) {
-        final hasAvatar = _avatarBytes != null && _avatarBytes!.isNotEmpty;
+        final hasAvatar =
+            _campusAvatarBytes != null && _campusAvatarBytes!.isNotEmpty;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              hasAvatar ? '已同步教务个人头像' : '教务系统未设置个人头像，已使用默认头像',
+              hasAvatar ? '已同步学校个人头像' : '学校系统未检测到个人头像，已使用默认头像',
             ),
           ),
         );
@@ -106,6 +151,166 @@ class _MinePageState extends State<MinePage> {
     } finally {
       if (mounted) setState(() => _profileLoading = false);
     }
+  }
+
+  Widget _buildAvatarImage(Uint8List? bytes, double size) {
+    if (bytes != null && bytes.isNotEmpty) {
+      return Image.memory(
+        bytes,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => Image.asset(
+          'assets/images/default_avatar.png',
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+        ),
+      );
+    }
+    return Image.asset(
+      'assets/images/default_avatar.png',
+      width: size,
+      height: size,
+      fit: BoxFit.cover,
+    );
+  }
+
+  Future<void> _openAvatarSheet() async {
+    await showMiuixSheet<void>(
+      context,
+      builder: (sheetContext) {
+        final palette = sheetContext.palette;
+
+        Future<void> pickFromGallery() async {
+          Navigator.of(sheetContext).pop();
+          try {
+            final result = await NativeApi.call('pickCustomAvatar');
+            if (result['cancelled'] == true) return;
+            final bytes = _decodeAvatarBytes(result['avatar_base64']);
+            if (bytes == null || !mounted) return;
+            setState(() {
+              _customAvatarBytes = bytes;
+              _avatarMode = 'custom';
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已更换为自定义头像')),
+            );
+          } catch (caught) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('更换头像失败：$caught')),
+            );
+          }
+        }
+
+        Future<void> useCampusAvatar() async {
+          Navigator.of(sheetContext).pop();
+          try {
+            await NativeApi.call('setAvatarMode', {'mode': 'auto'});
+            if (!mounted) return;
+            setState(() {
+              _customAvatarBytes = null;
+              _avatarMode = 'auto';
+            });
+            await _refreshProfile(userInitiated: true);
+          } catch (caught) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('切换失败：$caught')),
+            );
+          }
+        }
+
+        Future<void> useDefaultAvatar() async {
+          Navigator.of(sheetContext).pop();
+          try {
+            await NativeApi.call('setAvatarMode', {'mode': 'default'});
+            if (!mounted) return;
+            setState(() {
+              _customAvatarBytes = null;
+              _avatarMode = 'default';
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已切换为默认头像')),
+            );
+          } catch (caught) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('切换失败：$caught')),
+            );
+          }
+        }
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MiuixSheetHeader(
+              title: '更换头像',
+              subtitle: _avatarStatusLabel(),
+            ),
+            const SizedBox(height: 16),
+            Center(
+              child: SizedBox(
+                width: 74,
+                height: 74,
+                child: Material(
+                  color: palette.cardSubtle,
+                  shape: miuixShape(22),
+                  clipBehavior: Clip.antiAlias,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _buildAvatarImage(_effectiveAvatarBytes, 74),
+                      IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: ShapeDecoration(
+                            shape: miuixShape(
+                              22,
+                              side: BorderSide(color: palette.border, width: 1),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            MiuixGroupedCard(
+              children: [
+                MiuixTile(
+                  icon: Icons.photo_library_outlined,
+                  iconColor: palette.primary,
+                  title: '从相册选择头像',
+                  subtitle: '支持静态图片及 GIF / WebP 动图',
+                  onTap: pickFromGallery,
+                ),
+                MiuixTile(
+                  icon: Icons.sync_rounded,
+                  iconColor: palette.info,
+                  title: '使用教务 / 门户个人头像',
+                  subtitle: '从统一门户与教务系统自动获取',
+                  trailingText: _avatarMode == 'auto' ? '当前' : null,
+                  onTap: useCampusAvatar,
+                ),
+                MiuixTile(
+                  icon: Icons.face_retouching_natural_outlined,
+                  iconColor: palette.warning,
+                  title: '恢复默认头像',
+                  subtitle: '使用内置默认头像图片',
+                  trailingText: _avatarMode == 'default' ? '当前' : null,
+                  onTap: useDefaultAvatar,
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _loadAiConfig() async {
@@ -406,44 +611,60 @@ class _MinePageState extends State<MinePage> {
           padding: const EdgeInsets.all(18),
           child: Row(
             children: [
-              SizedBox(
-                width: 56,
-                height: 56,
-                child: Material(
-                  color: palette.cardSubtle,
-                  shape: miuixShape(18),
-                  clipBehavior: Clip.antiAlias,
+              GestureDetector(
+                onTap: _openAvatarSheet,
+                child: SizedBox(
+                  width: 58,
+                  height: 58,
                   child: Stack(
-                    fit: StackFit.expand,
+                    clipBehavior: Clip.none,
                     children: [
-                      if (_avatarBytes != null && _avatarBytes!.isNotEmpty)
-                        Image.memory(
-                          _avatarBytes!,
-                          width: 56,
-                          height: 56,
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                          errorBuilder: (_, _, _) => Image.asset(
-                            'assets/images/default_avatar.png',
-                            width: 56,
-                            height: 56,
-                            fit: BoxFit.cover,
+                      SizedBox(
+                        width: 56,
+                        height: 56,
+                        child: Material(
+                          color: palette.cardSubtle,
+                          shape: miuixShape(18),
+                          clipBehavior: Clip.antiAlias,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              _buildAvatarImage(_effectiveAvatarBytes, 56),
+                              IgnorePointer(
+                                child: DecoratedBox(
+                                  decoration: ShapeDecoration(
+                                    shape: miuixShape(
+                                      18,
+                                      side: BorderSide(
+                                        color: palette.border,
+                                        width: 0.8,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        )
-                      else
-                        Image.asset(
-                          'assets/images/default_avatar.png',
-                          width: 56,
-                          height: 56,
-                          fit: BoxFit.cover,
                         ),
-                      IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: ShapeDecoration(
-                            shape: miuixShape(
-                              18,
-                              side: BorderSide(color: palette.border, width: 0.8),
+                      ),
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: palette.card,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: palette.border,
+                              width: 0.9,
                             ),
+                          ),
+                          child: Icon(
+                            Icons.edit_rounded,
+                            size: 11,
+                            color: palette.primary,
                           ),
                         ),
                       ),
@@ -489,14 +710,22 @@ class _MinePageState extends State<MinePage> {
                 ),
               ),
               IconButton(
-                tooltip: '同步教务个人头像',
+                tooltip: _avatarMode == 'auto' ? '同步学校个人头像' : '更换头像',
                 onPressed: _profileLoading
                     ? null
-                    : () => _refreshProfile(userInitiated: true),
+                    : () {
+                        if (_avatarMode == 'auto') {
+                          _refreshProfile(userInitiated: true);
+                        } else {
+                          _openAvatarSheet();
+                        }
+                      },
                 icon: _profileLoading
                     ? const Loader(size: 16)
                     : Icon(
-                        Icons.refresh_rounded,
+                        _avatarMode == 'auto'
+                            ? Icons.refresh_rounded
+                            : Icons.tune_rounded,
                         color: palette.inkMuted,
                         size: 20,
                       ),
